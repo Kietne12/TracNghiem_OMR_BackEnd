@@ -1,6 +1,6 @@
 import jwt from "jsonwebtoken";
 import { Op } from "sequelize";
-import { User } from "../models/index.js";
+import { Account, User } from "../models/index.js";
 
 /**
  * POST /api/auth/login
@@ -61,7 +61,7 @@ export const login = async (req, res) => {
  */
 export const getMe = async (req, res) => {
   try {
-    const user = await User.findByPk(req.user.id, {
+    const user = await Account.findByPk(req.user.id, {
       attributes: { exclude: ["password"] },
     });
 
