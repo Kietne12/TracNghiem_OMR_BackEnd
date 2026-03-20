@@ -1,18 +1,35 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path";
 import { sequelize } from "./models/index.js";
 import authRoutes from "./routes/authRoutes.js";
+import dashboardRoutes from "./routes/dashboardRoutes.js";
+import questionBankGiangVienRoutes from "./routes/questionBankGiangVienRoutes.js";
+import examRoutes from "./routes/examRoutes.js";
+import omrRoutes from "./routes/omrRoutes.js";
+import practiceRoutes from "./routes/practiceRoutes.js";
+import { verifyToken } from "./middlewares/authMiddleware.js";
 
 dotenv.config();
 
 const app = express();
 
-app.use(cors());
+app.use(
+  cors({
+    exposedHeaders: ["Content-Disposition", "Content-Type", "Content-Length"],
+  })
+);
 app.use(express.json());
+app.use("/uploads", express.static(path.resolve("uploads")));
 
 // Routes
 app.use("/api/auth", authRoutes);
+app.use("/api/dashboard", verifyToken, dashboardRoutes);
+app.use("/api/question-bank", verifyToken, questionBankGiangVienRoutes);
+app.use("/api/exams", verifyToken, examRoutes);
+app.use("/api/omr", omrRoutes);
+app.use("/api/practice", practiceRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend running");
@@ -27,10 +44,10 @@ const startServer = async () => {
     await sequelize.authenticate();
     console.log("Kết nối MariaDB thành công!");
 
-    // Đồng bộ tất cả models sang database (tương tự hibernate.hbm2ddl.auto = update)
-    // alter: true  -> cập nhật bảng nếu model thay đổi (giữ dữ liệu)
-    // force: true  -> xóa & tạo lại bảng (MẤT dữ liệu, chỉ dùng khi dev)
-    await sequelize.sync({ alter: true });
+    // Đồng bộ các models với database.
+    // fix: tránh lỗi MariaDB "Too many keys specified" khi tái tạo index qua alter.
+    // Dùng sync() mặc định -> chỉ tạo bảng khi chưa có.
+    await sequelize.sync();
     console.log("Đồng bộ models thành công!");
 
     app.listen(PORT, () => {

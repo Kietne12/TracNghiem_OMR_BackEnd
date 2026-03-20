@@ -19,6 +19,10 @@ import LopSinhVien from "./ClassStudent.js";
 import BaiLam from "./ExamAttempt.js";
 import ThongKeCauHoi from "./QuestionStatistic.js";
 import Account from "./Account.js";
+import CauHinhKyThi from "./ExamConfig.js";
+import { BaiLuyenTap } from "./BaiLuyenTap.js";
+import { LichSuBaiLuyenTap } from "./LichSuBaiLuyenTap.js";
+import { ChiTietBaiLuyenTap } from "./ChiTietBaiLuyenTap.js";
 
 // ============================
 // Định nghĩa quan hệ giữa các bảng ở đây
@@ -26,6 +30,10 @@ import Account from "./Account.js";
 // User.hasMany(Exam, { foreignKey: "created_by" });
 // Exam.belongsTo(User, { foreignKey: "created_by" });
 // ============================
+
+const BaiLuyenTapModel = BaiLuyenTap(sequelize);
+const LichSuBaiLuyenTapModel = LichSuBaiLuyenTap(sequelize);
+const ChiTietBaiLuyenTapModel = ChiTietBaiLuyenTap(sequelize);
 
 export {
   sequelize,
@@ -42,7 +50,11 @@ export {
   KetQuaOMR,
   ThongKeCauHoi,
   ThongKeKyThi,
-   Account,
+  Account,
+  CauHinhKyThi,
+  BaiLuyenTapModel as BaiLuyenTap,
+  LichSuBaiLuyenTapModel as LichSuBaiLuyenTap,
+  ChiTietBaiLuyenTapModel as ChiTietBaiLuyenTap,
 };
 
 User.hasOne(Account, { foreignKey: "user_id",});
@@ -51,7 +63,8 @@ Account.belongsTo(User, { foreignKey: "user_id",});
 CauHoi.belongsTo(MonHoc, { foreignKey: "mon_hoc_id" });
 KyThi.belongsTo(MonHoc, { foreignKey: "mon_hoc_id" });
 
-BaiLam.belongsTo(KyThi, { foreignKey: "ky_thi_id" });
+BaiLam.belongsTo(KyThi, { foreignKey: "ky_thi_id", as: "ky_thi" });
+KyThi.hasMany(BaiLam, { foreignKey: "ky_thi_id", as: "bai_lams" });
 
 ChiTietBaiLam.belongsTo(BaiLam, { foreignKey: "bai_lam_id" });
 ChiTietBaiLam.belongsTo(CauHoi, { foreignKey: "cau_hoi_id" });
@@ -60,6 +73,8 @@ CauHoiKyThi.belongsTo(CauHoi, { foreignKey: "cau_hoi_id" });
 
 KyThi.hasMany(CauHoiKyThi, { foreignKey: "ky_thi_id" });
 CauHoi.hasMany(CauHoiKyThi, { foreignKey: "cau_hoi_id" });
+KyThi.hasOne(CauHinhKyThi, { foreignKey: "ky_thi_id", as: "cau_hinh" });
+CauHinhKyThi.belongsTo(KyThi, { foreignKey: "ky_thi_id" });
 LopSinhVien.belongsTo(LopHoc, { foreignKey: "lop_id" });
 LopSinhVien.belongsTo(User, { foreignKey: "sinh_vien_id" });
 
@@ -76,3 +91,49 @@ ThongKeCauHoi.belongsTo(CauHoi, { foreignKey: "cau_hoi_id" });
 CauHoi.hasOne(ThongKeCauHoi, { foreignKey: "cau_hoi_id" });
 ThongKeKyThi.belongsTo(KyThi, { foreignKey: "ky_thi_id" });
 KyThi.hasOne(ThongKeKyThi, { foreignKey: "ky_thi_id" });
+
+// Associations cho BaiLuyenTap
+BaiLuyenTapModel.hasMany(LichSuBaiLuyenTapModel, {
+  foreignKey: "bai_luyen_tap_id",
+  as: "lich_su",
+});
+LichSuBaiLuyenTapModel.belongsTo(BaiLuyenTapModel, {
+  foreignKey: "bai_luyen_tap_id",
+  as: "bai_luyen_tap",
+});
+
+LichSuBaiLuyenTapModel.hasMany(ChiTietBaiLuyenTapModel, {
+  foreignKey: "lich_su_bai_id",
+  as: "chi_tiet",
+});
+ChiTietBaiLuyenTapModel.belongsTo(LichSuBaiLuyenTapModel, {
+  foreignKey: "lich_su_bai_id",
+  as: "lich_su",
+});
+
+LichSuBaiLuyenTapModel.belongsTo(User, {
+  foreignKey: "sinh_vien_id",
+  as: "sinh_vien",
+});
+User.hasMany(LichSuBaiLuyenTapModel, {
+  foreignKey: "sinh_vien_id",
+  as: "lich_su_luyen_tap",
+});
+
+ChiTietBaiLuyenTapModel.belongsTo(CauHoi, {
+  foreignKey: "cau_hoi_id",
+  as: "cau_hoi",
+});
+CauHoi.hasMany(ChiTietBaiLuyenTapModel, {
+  foreignKey: "cau_hoi_id",
+  as: "chi_tiet_luyen_tap",
+});
+
+BaiLuyenTapModel.belongsTo(LopHoc, {
+  foreignKey: "lop_id",
+  as: "lop_hoc",
+});
+LopHoc.hasMany(BaiLuyenTapModel, {
+  foreignKey: "lop_id",
+  as: "bai_luyen_taps",
+});

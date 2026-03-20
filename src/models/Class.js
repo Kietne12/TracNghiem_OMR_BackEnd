@@ -16,6 +16,16 @@ const LopHoc = sequelize.define("lop_hoc", {
     type: DataTypes.TEXT,
   },
 
+  hoc_ky: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+  },
+
+  nam_hoc: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+  },
+
   trang_thai: {
     type: DataTypes.BOOLEAN,
   },
