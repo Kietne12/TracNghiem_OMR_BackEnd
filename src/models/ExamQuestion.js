@@ -17,6 +17,11 @@ const DeThi = sequelize.define("de_thi", {
     type: DataTypes.INTEGER,
     allowNull: false,
   },
+
+  ma_de: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+  },
 });
 
 export default DeThi;

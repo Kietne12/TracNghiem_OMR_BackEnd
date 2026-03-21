@@ -9,6 +9,46 @@ const normalizeAnswerChoice = (choice) => {
   return ANSWER_LETTERS.includes(normalized) ? normalized : null;
 };
 
+// Helper function for flexible MSSV matching (handles padding mismatches like 0001 vs 00001)
+const findStudentByFlexibleMSSV = async (mssv) => {
+  if (!mssv) return null;
+  
+  const trimmedMSSV = String(mssv).trim();
+  
+  // Strategy 1: Try exact match first
+  let student = await User.findOne({
+    where: { mssv: trimmedMSSV },
+    attributes: ["id", "mssv", "ho_ten"],
+    raw: true,
+  });
+  
+  if (student) return student;
+  
+  // Strategy 2: Try left-padding to 5 digits (most common MSSV format)
+  const paddedMSSV = trimmedMSSV.padStart(5, "0");
+  if (paddedMSSV !== trimmedMSSV) {
+    student = await User.findOne({
+      where: { mssv: paddedMSSV },
+      attributes: ["id", "mssv", "ho_ten"],
+      raw: true,
+    });
+    if (student) return student;
+  }
+  
+  // Strategy 3: Try removing leading zeros (in case detector returned padded version)
+  const unpadded = trimmedMSSV.replace(/^0+/, "") || "0";
+  if (unpadded !== trimmedMSSV) {
+    student = await User.findOne({
+      where: { mssv: unpadded },
+      attributes: ["id", "mssv", "ho_ten"],
+      raw: true,
+    });
+    if (student) return student;
+  }
+  
+  return null;
+};
+
 export const processScanResult = async (req, res) => {
   try {
     const { ky_thi_id, file_omr_id, mssv, ma_de, answers } = req.body;
@@ -33,14 +73,12 @@ export const processScanResult = async (req, res) => {
       return res.status(400).json({ message: "Kỳ thi này không ở chế độ OMR" });
     }
 
-    const student = await User.findOne({
-      where: { mssv },
-      attributes: ["id", "mssv", "ho_ten"],
-      raw: true,
-    });
+    const student = await findStudentByFlexibleMSSV(mssv);
 
     if (!student) {
-      return res.status(404).json({ message: `Không tìm thấy sinh viên MSSV: ${mssv}` });
+      return res.status(404).json({ 
+        message: `Không tìm thấy sinh viên MSSV: ${mssv}. Vui lòng kiểm tra lại định dạng MSSV.` 
+      });
     }
 
     const normalizedAnswers = Array.isArray(answers)

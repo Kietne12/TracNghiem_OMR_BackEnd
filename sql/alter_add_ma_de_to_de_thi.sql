@@ -1,0 +1,4 @@
+USE omr_exam;
+
+ALTER TABLE de_thi
+ADD COLUMN IF NOT EXISTS ma_de VARCHAR(20) NULL;

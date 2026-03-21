@@ -31,16 +31,24 @@ export const detectOMRMarkings = async (imagePath) => {
     console.log('════════════════════════════════════════');
 
     const imageBuffer = fs.readFileSync(imagePath);
-    const image = sharp(imageBuffer);
-    const metadata = await image.metadata();
 
-    console.log(`   📸 Kích thước ảnh: ${metadata.width}x${metadata.height}`);
+    // Normalize orientation first (apply EXIF rotation), then normalize format if needed.
+    let normalizedBuffer = await sharp(imageBuffer).rotate().toBuffer();
+    let metadata = await sharp(normalizedBuffer).metadata();
 
-    // Normalize image format
-    let normalizedBuffer = imageBuffer;
-    if (metadata.format !== 'jpeg' && metadata.format !== 'png') {
-      normalizedBuffer = await sharp(imageBuffer).png().toBuffer();
+    // OMR template in this project is portrait. If input is landscape, rotate to portrait.
+    if ((metadata.width || 0) > (metadata.height || 0)) {
+      normalizedBuffer = await sharp(normalizedBuffer).rotate(90).toBuffer();
+      metadata = await sharp(normalizedBuffer).metadata();
+      console.log('   ↻ Ảnh đầu vào đang ngang, đã xoay về dọc để quét OMR');
     }
+
+    if (metadata.format !== 'jpeg' && metadata.format !== 'png') {
+      normalizedBuffer = await sharp(normalizedBuffer).png().toBuffer();
+      metadata = await sharp(normalizedBuffer).metadata();
+    }
+
+    console.log(`   📸 Kích thước ảnh sau chuẩn hóa: ${metadata.width}x${metadata.height}`);
 
     // Calculate layout scale based on image size
     const layoutScale = metadata.width / 2480; // Assume A4 @ 300dpi
@@ -118,61 +126,69 @@ export const detectOMRMarkings = async (imagePath) => {
  */
 const detectAnchorPoints = async (imageBuffer, metadata) => {
   try {
-    // Create grayscale version for analysis
-    const grayscaleBuffer = await sharp(imageBuffer)
+    // Giảm kích thước trước khi detect để tăng tốc STEP 1 rõ rệt
+    const targetWidth = 900;
+    const resizedBuffer = await sharp(imageBuffer)
+      .resize({ width: targetWidth, withoutEnlargement: true })
       .grayscale()
+      .threshold(110)
+      .raw()
       .toBuffer({ resolveWithObject: true });
 
-    const { data, info } = grayscaleBuffer;
-    const { width, height, channels } = info;
+    const { data, info } = resizedBuffer;
+    const { width, height } = info;
 
-    // Detect black regions (pixel value < 100)
-    const blackPixels = [];
-    
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const pixelIndex = (y * width + x) * channels;
-        const pixelValue = data[pixelIndex];
-        
-        if (pixelValue < 100) {
-          blackPixels.push({ x, y, intensity: pixelValue });
-        }
-      }
+    // Tỷ lệ scale để map tọa độ từ ảnh thu nhỏ về ảnh gốc
+    const scaleX = metadata.width / width;
+    const scaleY = metadata.height / height;
+
+    // Chỉ quét 4 góc, tránh quét toàn ảnh (nhanh hơn rất nhiều)
+    const cornerRatio = 0.22;
+    const cornerW = Math.max(40, Math.floor(width * cornerRatio));
+    const cornerH = Math.max(40, Math.floor(height * cornerRatio));
+
+    const cornerRegions = [
+      { name: 'topLeft', x: 0, y: 0, w: cornerW, h: cornerH },
+      { name: 'topRight', x: width - cornerW, y: 0, w: cornerW, h: cornerH },
+      { name: 'bottomLeft', x: 0, y: height - cornerH, w: cornerW, h: cornerH },
+      { name: 'bottomRight', x: width - cornerW, y: height - cornerH, w: cornerW, h: cornerH },
+    ];
+
+    const detectedAnchors = [];
+    for (const region of cornerRegions) {
+      const anchor = findAnchorInCornerRegion(data, width, height, region);
+      if (!anchor) continue;
+
+      // Quy đổi về tọa độ ảnh gốc
+      detectedAnchors.push({
+        x: Math.round(anchor.x * scaleX),
+        y: Math.round(anchor.y * scaleY),
+        size: anchor.size,
+        region: region.name,
+      });
     }
 
-    if (blackPixels.length === 0) return null;
-
-    // Cluster black pixels to find anchor points (6x6px squares)
-    const clusters = clusterPixels(blackPixels, 15); // 15px radius for clustering
-    
-    // Filter clusters by size (anchor points should be ~6x6px = ~36px²)
-    const validClusters = clusters.filter(cluster => {
-      const area = cluster.length;
-      return area > 20 && area < 100; // Reasonable anchor point size
-    });
-
-    if (validClusters.length < 4) {
-      console.log(`   ℹ Tìm được ${validClusters.length} cluster đen (cần 4 cho anchor points)`);
+    if (detectedAnchors.length < 4) {
+      console.log(`   ℹ Tìm được ${detectedAnchors.length}/4 điểm neo ở 4 góc`);
       return null;
     }
 
-    // Calculate cluster centers
-    const anchorPoints = validClusters.map(cluster => ({
-      x: Math.round(cluster.reduce((sum, p) => sum + p.x, 0) / cluster.length),
-      y: Math.round(cluster.reduce((sum, p) => sum + p.y, 0) / cluster.length),
-      size: cluster.length,
-    }));
+    // Bảo đảm thứ tự cố định: TL, TR, BL, BR
+    const topLeft = detectedAnchors.find((p) => p.region === 'topLeft');
+    const topRight = detectedAnchors.find((p) => p.region === 'topRight');
+    const bottomLeft = detectedAnchors.find((p) => p.region === 'bottomLeft');
+    const bottomRight = detectedAnchors.find((p) => p.region === 'bottomRight');
 
-    // Sort by position: identify corners
-    // Top-left, top-right, bottom-left, bottom-right
-    anchorPoints.sort((a, b) => {
-      if (Math.abs(a.y - b.y) < 50) return a.x - b.x; // Same Y → sort by X
-      return a.y - b.y; // Different Y → sort by Y
-    });
+    if (!topLeft || !topRight || !bottomLeft || !bottomRight) {
+      console.log('   ℹ Một hoặc nhiều góc không tìm được anchor rõ ràng');
+      return null;
+    }
 
-    console.log(`   ✓ Tìm thấy ${anchorPoints.length} điểm neo tiềm năng:`);
+    const anchorPoints = [topLeft, topRight, bottomLeft, bottomRight];
+
+    console.log(`   ✓ Tìm thấy ${anchorPoints.length}/4 điểm neo:`);
     anchorPoints.forEach((p, i) => {
-      console.log(`      [${i}] (${p.x}, ${p.y}) - size: ${p.size}px²`);
+      console.log(`      [${i}] (${p.x}, ${p.y}) - size: ${p.size}px² - ${p.region}`);
     });
 
     return anchorPoints;
@@ -183,51 +199,83 @@ const detectAnchorPoints = async (imageBuffer, metadata) => {
 };
 
 /**
- * Cluster pixels using simple spatial clustering
+ * Tìm anchor tốt nhất trong một vùng góc bằng connected-components
  */
-const clusterPixels = (pixels, radius) => {
-  if (pixels.length === 0) return [];
+const findAnchorInCornerRegion = (data, width, height, region) => {
+  const xStart = Math.max(0, region.x);
+  const yStart = Math.max(0, region.y);
+  const xEnd = Math.min(width, region.x + region.w);
+  const yEnd = Math.min(height, region.y + region.h);
 
-  const clusters = [];
-  const visited = new Set();
+  const roiW = xEnd - xStart;
+  const roiH = yEnd - yStart;
+  if (roiW <= 0 || roiH <= 0) return null;
 
-  for (const pixel of pixels) {
-    const key = `${pixel.x},${pixel.y}`;
-    if (visited.has(key)) continue;
+  const visited = new Uint8Array(roiW * roiH);
+  const toRoiIndex = (x, y) => (y - yStart) * roiW + (x - xStart);
+  const isBlack = (x, y) => data[y * width + x] < 20;
 
-    const cluster = [];
-    const queue = [pixel];
+  // Anchor là hình vuông nhỏ, sau resize thường còn khoảng 2x2 -> 8x8 px
+  const minArea = 4;
+  const maxArea = 220;
+  const targetArea = 30;
 
-    while (queue.length > 0) {
-      const current = queue.shift();
-      const currentKey = `${current.x},${current.y}`;
+  let best = null;
 
-      if (visited.has(currentKey)) continue;
-      visited.add(currentKey);
-      cluster.push(current);
+  for (let y = yStart; y < yEnd; y++) {
+    for (let x = xStart; x < xEnd; x++) {
+      const ri = toRoiIndex(x, y);
+      if (visited[ri] === 1) continue;
+      if (!isBlack(x, y)) continue;
 
-      // Find neighbors
-      for (const neighbor of pixels) {
-        const neighborKey = `${neighbor.x},${neighbor.y}`;
-        if (visited.has(neighborKey)) continue;
+      // BFS bằng queue + con trỏ index (không dùng shift để tránh chậm)
+      const queue = [[x, y]];
+      visited[ri] = 1;
+      let qIndex = 0;
 
-        const distance = Math.sqrt(
-          Math.pow(current.x - neighbor.x, 2) +
-          Math.pow(current.y - neighbor.y, 2)
-        );
+      let area = 0;
+      let sumX = 0;
+      let sumY = 0;
 
-        if (distance <= radius) {
-          queue.push(neighbor);
+      while (qIndex < queue.length) {
+        const [cx, cy] = queue[qIndex];
+        qIndex += 1;
+
+        area += 1;
+        sumX += cx;
+        sumY += cy;
+
+        const neighbors = [
+          [cx - 1, cy],
+          [cx + 1, cy],
+          [cx, cy - 1],
+          [cx, cy + 1],
+        ];
+
+        for (const [nx, ny] of neighbors) {
+          if (nx < xStart || nx >= xEnd || ny < yStart || ny >= yEnd) continue;
+          const nri = toRoiIndex(nx, ny);
+          if (visited[nri] === 1) continue;
+          visited[nri] = 1;
+          if (isBlack(nx, ny)) {
+            queue.push([nx, ny]);
+          }
         }
       }
-    }
 
-    if (cluster.length > 0) {
-      clusters.push(cluster);
+      if (area < minArea || area > maxArea) continue;
+
+      const centerX = Math.round(sumX / area);
+      const centerY = Math.round(sumY / area);
+
+      const score = Math.abs(area - targetArea);
+      if (!best || score < best.score) {
+        best = { x: centerX, y: centerY, size: area, score };
+      }
     }
   }
 
-  return clusters.sort((a, b) => b.length - a.length);
+  return best ? { x: best.x, y: best.y, size: best.size } : null;
 };
 
 /**
@@ -282,8 +330,9 @@ const extractRegionROIs = async (imageBuffer, metadata, layoutParams) => {
     const sbdBoxWidth = (rightInfoWidth - 10) * 0.65;
     const rightInnerGap = 10;
     const madeBoxWidth = rightInfoWidth - rightInnerGap - sbdBoxWidth;
-    const infoBoxHeight = Math.round(250 * layoutScale);
-    const infoTop = Math.round(74 * layoutScale);
+    // Use page-height ratios for photographed sheets; fixed pixel scaling is unstable here.
+    const infoTop = Math.round(pageHeight * 0.14);
+    const infoBoxHeight = Math.round(pageHeight * 0.33);
 
     // Extract SBD region
     console.log(`   → Trích xuất vùng SBD...`);
@@ -294,6 +343,8 @@ const extractRegionROIs = async (imageBuffer, metadata, layoutParams) => {
         width: Math.round(sbdBoxWidth),
         height: infoBoxHeight,
       })
+      .greyscale()
+      .raw()
       .toBuffer({ resolveWithObject: true });
 
     // Extract Mã Đề region
@@ -305,12 +356,14 @@ const extractRegionROIs = async (imageBuffer, metadata, layoutParams) => {
         width: Math.round(madeBoxWidth),
         height: infoBoxHeight,
       })
+      .greyscale()
+      .raw()
       .toBuffer({ resolveWithObject: true });
 
     // Extract Answers grid region
     console.log(`   → Trích xuất vùng Đáp án...`);
     const answersGridX = Math.round(marginLeft);
-    const answersGridY = Math.round(infoTop + infoBoxHeight + Math.round(30 * layoutScale));
+    const answersGridY = Math.round(infoTop + infoBoxHeight + pageHeight * 0.02);
     const answersGridWidth = Math.round(pageWidth - 2 * marginLeft);
     const answersGridHeight = Math.round(pageHeight - answersGridY - marginTop);
 
@@ -321,6 +374,8 @@ const extractRegionROIs = async (imageBuffer, metadata, layoutParams) => {
         width: answersGridWidth,
         height: answersGridHeight,
       })
+      .greyscale()
+      .raw()
       .toBuffer({ resolveWithObject: true });
 
     console.log(`   ✓ Đã trích xuất 3 vùng ROI`);
@@ -357,29 +412,48 @@ const detectStudentNumberEnhanced = async (roiData) => {
     for (let col = 0; col < digitColumns; col++) {
       const colStart = Math.round(col * colWidth + 2);
       const colEnd = Math.round((col + 1) * colWidth - 2);
+      const colCenterX = Math.round((colStart + colEnd) / 2);
+      const rowHeight = gridHeight / 10;
+      const bubbleOuterR = Math.max(5, Math.round(Math.min(colWidth, rowHeight) * 0.20));
+      const bubbleInnerR = Math.max(3, Math.round(bubbleOuterR * 0.55));
 
       // Measure darkness for each digit row (0-9)
       const digitDarkness = [];
 
       for (let digit = 0; digit < 10; digit++) {
-        const digitRowY = Math.round(gridStartY + (digit / 10) * gridHeight);
-        const digitRowStart = Math.max(gridStartY, digitRowY - 8);
-        const digitRowEnd = Math.min(gridEndY, digitRowY + 8);
+        const digitRowY = Math.round(gridStartY + ((digit + 0.5) / 10) * gridHeight);
+        let innerDark = 0;
+        let innerTotal = 0;
+        let ringDark = 0;
+        let ringTotal = 0;
 
-        let darkPixels = 0;
-        let totalPixels = 0;
+        for (let dy = -bubbleOuterR; dy <= bubbleOuterR; dy++) {
+          for (let dx = -bubbleOuterR; dx <= bubbleOuterR; dx++) {
+            const dist2 = dx * dx + dy * dy;
+            if (dist2 > bubbleOuterR * bubbleOuterR) continue;
 
-        for (let y = digitRowStart; y < digitRowEnd; y++) {
-          for (let x = colStart; x < colEnd; x++) {
+            const x = colCenterX + dx;
+            const y = digitRowY + dy;
+
             if (x < 0 || x >= width || y < 0 || y >= height) continue;
             const pixelValue = data[y * width + x];
-            totalPixels++;
-            if (pixelValue < 150) darkPixels++;
+            const isDark = pixelValue < 145;
+
+            if (dist2 <= bubbleInnerR * bubbleInnerR) {
+              innerTotal++;
+              if (isDark) innerDark++;
+            } else {
+              ringTotal++;
+              if (isDark) ringDark++;
+            }
           }
         }
 
-        const darkness = totalPixels > 0 ? darkPixels / totalPixels : 0;
-        digitDarkness.push({ digit, darkness });
+        const innerRatio = innerTotal > 0 ? innerDark / innerTotal : 0;
+        const ringRatio = ringTotal > 0 ? ringDark / ringTotal : 0;
+        // Filled bubble should have dark center; empty bubble mainly dark ring only.
+        const score = innerRatio - ringRatio * 0.35;
+        digitDarkness.push({ digit, darkness: score });
       }
 
       // Find digit with highest darkness (filled bubble)
@@ -387,7 +461,12 @@ const detectStudentNumberEnhanced = async (roiData) => {
         curr.darkness > max.darkness ? curr : max
       );
 
-      digits.push(filledDigit.darkness > 0.15 ? filledDigit.digit : 0);
+      const selectedDigit = filledDigit.darkness > 0.04 ? filledDigit.digit : 0;
+      digits.push(selectedDigit);
+      
+      // DEBUG: Print darkness values for this column
+      const darknessStr = digitDarkness.map(d => `${d.digit}:${(d.darkness*100).toFixed(1)}%`).join(' | ');
+      console.log(`   [COL ${col}] Darkness: ${darknessStr} → Selected: ${selectedDigit} (max: ${filledDigit.digit} @${(filledDigit.darkness*100).toFixed(1)}%)`);
     }
 
     const result = digits.join('');
@@ -425,35 +504,58 @@ const detectExamCodeEnhanced = async (roiData) => {
     for (let col = 0; col < digitColumns; col++) {
       const colStart = Math.round(col * colWidth + 2);
       const colEnd = Math.round((col + 1) * colWidth - 2);
+      const colCenterX = Math.round((colStart + colEnd) / 2);
+      const rowHeight = gridHeight / 10;
+      const bubbleOuterR = Math.max(5, Math.round(Math.min(colWidth, rowHeight) * 0.20));
+      const bubbleInnerR = Math.max(3, Math.round(bubbleOuterR * 0.55));
 
       const digitDarkness = [];
 
       for (let digit = 0; digit < 10; digit++) {
-        const digitRowY = Math.round(gridStartY + (digit / 10) * gridHeight);
-        const digitRowStart = Math.max(gridStartY, digitRowY - 8);
-        const digitRowEnd = Math.min(gridEndY, digitRowY + 8);
+        const digitRowY = Math.round(gridStartY + ((digit + 0.5) / 10) * gridHeight);
+        let innerDark = 0;
+        let innerTotal = 0;
+        let ringDark = 0;
+        let ringTotal = 0;
 
-        let darkPixels = 0;
-        let totalPixels = 0;
+        for (let dy = -bubbleOuterR; dy <= bubbleOuterR; dy++) {
+          for (let dx = -bubbleOuterR; dx <= bubbleOuterR; dx++) {
+            const dist2 = dx * dx + dy * dy;
+            if (dist2 > bubbleOuterR * bubbleOuterR) continue;
 
-        for (let y = digitRowStart; y < digitRowEnd; y++) {
-          for (let x = colStart; x < colEnd; x++) {
+            const x = colCenterX + dx;
+            const y = digitRowY + dy;
+
             if (x < 0 || x >= width || y < 0 || y >= height) continue;
             const pixelValue = data[y * width + x];
-            totalPixels++;
-            if (pixelValue < 150) darkPixels++;
+            const isDark = pixelValue < 145;
+
+            if (dist2 <= bubbleInnerR * bubbleInnerR) {
+              innerTotal++;
+              if (isDark) innerDark++;
+            } else {
+              ringTotal++;
+              if (isDark) ringDark++;
+            }
           }
         }
 
-        const darkness = totalPixels > 0 ? darkPixels / totalPixels : 0;
-        digitDarkness.push({ digit, darkness });
+        const innerRatio = innerTotal > 0 ? innerDark / innerTotal : 0;
+        const ringRatio = ringTotal > 0 ? ringDark / ringTotal : 0;
+        const score = innerRatio - ringRatio * 0.35;
+        digitDarkness.push({ digit, darkness: score });
       }
 
       const filledDigit = digitDarkness.reduce((max, curr) =>
         curr.darkness > max.darkness ? curr : max
       );
 
-      digits.push(filledDigit.darkness > 0.15 ? filledDigit.digit : 0);
+      const selectedDigit = filledDigit.darkness > 0.04 ? filledDigit.digit : 0;
+      digits.push(selectedDigit);
+      
+      // DEBUG: Print darkness values for this column
+      const darknessStr = digitDarkness.map(d => `${d.digit}:${(d.darkness*100).toFixed(1)}%`).join(' | ');
+      console.log(`   [MÃ ĐỀ COL ${col}] Darkness: ${darknessStr} → Selected: ${selectedDigit} (max: ${filledDigit.digit} @${(filledDigit.darkness*100).toFixed(1)}%)`);
     }
 
     const result = digits.join('');

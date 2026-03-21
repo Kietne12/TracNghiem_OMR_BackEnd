@@ -13,6 +13,7 @@ import {
   uploadOmrImage,
   deleteExam,
   getExamGradingResults,
+  getExamGradingResultDetail,
   downloadOmrExam,
   downloadOmrSheet,
 } from "../controllers/examController.js";
@@ -44,6 +45,7 @@ router.get("/:id", getExamById);
 router.put("/:id/config", updateExamConfig);
 router.delete("/:id", deleteExam);
 router.get("/:id/grading-results", getExamGradingResults);
+router.get("/:id/grading-results/:attemptId", getExamGradingResultDetail);
 router.get("/:id/omr-template", getOmrTemplate);
 router.get("/:id/omr/download-exam", downloadOmrExam);
 router.get("/:id/omr/download-sheet", downloadOmrSheet);

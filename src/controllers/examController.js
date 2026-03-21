@@ -246,12 +246,17 @@ const scanOmrLocally = async (imagePath) => {
       ? path.resolve(process.cwd(), imagePath.replace(/^\/+/, ""))
       : imagePath;
 
+    console.log(`   📂 Absolute path: ${absolutePath}`);
+    console.log(`   Exists? ${fs.existsSync(absolutePath)}`);
+
     if (!fs.existsSync(absolutePath)) {
       console.warn(`   ⚠ Ảnh không tồn tại: ${absolutePath}`);
       return null;
     }
 
+    console.log(`   ✓ Ảnh tồn tại, đang gọi detectOMRMarkings...`);
     const result = await detectOMRMarkings(absolutePath);
+    console.log(`   ✓ detectOMRMarkings trả về:`, result);
     
     if (!result || !result.mssv) {
       console.log(`   ⚠ Quét cục bộ không được kết quả hợp lệ`);
@@ -273,6 +278,7 @@ const scanOmrLocally = async (imagePath) => {
     };
   } catch (error) {
     console.warn(`   ⚠ Lỗi quét cục bộ: ${error.message}`);
+    console.warn(`   Stack:`, error.stack);
     return null;
   }
 };
@@ -326,7 +332,9 @@ const resolveOmrExamStructure = async (examId, config, requestedMaDe) => {
       (item) => String(item?.ma_de || "").trim().toUpperCase() === normalizedRequestedMaDe
     );
     if (!selectedMaDeData) {
-      throw new Error("Mã đề không hợp lệ hoặc không tồn tại trong kỳ thi");
+      // Detector can misread ma_de from photo; fall back to first generated mã đề
+      // so the upload flow does not break hard.
+      selectedMaDeData = maDeList.length > 0 ? maDeList[0] : null;
     }
   } else if (maDeList.length > 0) {
     selectedMaDeData = maDeList[0];
@@ -345,14 +353,48 @@ const resolveOmrExamStructure = async (examId, config, requestedMaDe) => {
   };
 };
 
-const gradeOmrAttempt = async ({ examId, fileOmrId, mssv, maDe, answersInput }) => {
-  const student = await User.findOne({
-    where: { mssv: String(mssv).trim() },
+// Helper function for flexible MSSV matching (handles padding mismatches like 0001 vs 00001)
+const findStudentByFlexibleMSSV = async (mssv) => {
+  if (!mssv) return null;
+  
+  const trimmedMSSV = String(mssv).trim();
+  
+  // Strategy 1: Try exact match first
+  let student = await User.findOne({
+    where: { mssv: trimmedMSSV },
     attributes: ["id", "mssv", "ho_ten"],
   });
+  
+  if (student) return student;
+  
+  // Strategy 2: Try left-padding to 5 digits (most common MSSV format)
+  const paddedMSSV = trimmedMSSV.padStart(5, "0");
+  if (paddedMSSV !== trimmedMSSV) {
+    student = await User.findOne({
+      where: { mssv: paddedMSSV },
+      attributes: ["id", "mssv", "ho_ten"],
+    });
+    if (student) return student;
+  }
+  
+  // Strategy 3: Try removing leading zeros (in case detector returned padded version)
+  const unpadded = trimmedMSSV.replace(/^0+/, "") || "0";
+  if (unpadded !== trimmedMSSV) {
+    student = await User.findOne({
+      where: { mssv: unpadded },
+      attributes: ["id", "mssv", "ho_ten"],
+    });
+    if (student) return student;
+  }
+  
+  return null;
+};
+
+const gradeOmrAttempt = async ({ examId, fileOmrId, mssv, maDe, answersInput }) => {
+  const student = await findStudentByFlexibleMSSV(mssv);
 
   if (!student) {
-    throw new Error("Không tìm thấy sinh viên theo MSSV");
+    throw new Error("Không tìm thấy sinh viên MSSV: " + String(mssv).trim() + ". Vui lòng kiểm tra lại định dạng MSSV.");
   }
 
   const config = await CauHinhKyThi.findOne({
@@ -661,10 +703,13 @@ const persistExamAndConfig = async ({
       transaction: tx,
     });
 
+    const storedMaDe = examPayload?.ma_de || maDeData?.[0]?.ma_de || null;
+
     await CauHoiKyThi.bulkCreate(
       questionIds.map((questionId) => ({
         ky_thi_id: exam.id,
         cau_hoi_id: questionId,
+        ma_de: storedMaDe,
       })),
       { transaction: tx }
     );
@@ -838,6 +883,7 @@ export const createExam = async (req, res) => {
       thoi_gian_lam_bai,
       thoi_gian_bat_dau,
       thoi_gian_ket_thuc,
+      ma_de,
       hoc_ky,
       nam_hoc,
     } = req.body;
@@ -889,6 +935,7 @@ export const createExam = async (req, res) => {
       thoi_gian_lam_bai,
       thoi_gian_bat_dau: startAt,
       thoi_gian_ket_thuc: endAt,
+      ma_de: ma_de ? String(ma_de).trim() : null,
       trang_thai: "open",
     };
 
@@ -968,6 +1015,7 @@ export const updateExamConfig = async (req, res) => {
       thoi_gian_lam_bai: req.body.thoi_gian_lam_bai || exam.thoi_gian_lam_bai,
       thoi_gian_bat_dau: startAt,
       thoi_gian_ket_thuc: endAt,
+      ma_de: req.body.ma_de ? String(req.body.ma_de).trim() : exam.ma_de || null,
       trang_thai: req.body.trang_thai || exam.trang_thai || "open",
     };
 
@@ -1089,6 +1137,7 @@ export const getExamGradingResults = async (req, res) => {
           correctAnswers,
           totalTime,
           status: attempt.tong_diem === null ? "Chờ chấm" : "Đã chấm",
+          detail_url: `/api/exams/${exam.id}/grading-results/${attempt.id}`,
         };
       })
     );
@@ -1113,6 +1162,103 @@ export const getExamGradingResults = async (req, res) => {
   } catch (error) {
     console.error("getExamGradingResults error:", error);
     return res.status(500).json({ message: "Lỗi khi lấy dữ liệu chấm bài" });
+  }
+};
+
+export const getExamGradingResultDetail = async (req, res) => {
+  try {
+    const { id, attemptId } = req.params;
+
+    const exam = await KyThi.findByPk(id, { raw: true });
+    if (!exam) {
+      return res.status(404).json({ message: "Không tìm thấy kỳ thi" });
+    }
+
+    const attempt = await BaiLam.findOne({
+      where: {
+        id: Number(attemptId),
+        ky_thi_id: Number(id),
+      },
+      raw: true,
+    });
+
+    if (!attempt) {
+      return res.status(404).json({ message: "Không tìm thấy bài làm" });
+    }
+
+    const student = await User.findByPk(attempt.sinh_vien_id, {
+      attributes: ["id", "mssv", "ho_ten"],
+      raw: true,
+    });
+
+    const details = await ChiTietBaiLam.findAll({
+      where: { bai_lam_id: attempt.id },
+      attributes: ["cau_hoi_id", "dap_an_chon", "dung_sai"],
+      order: [["id", "ASC"]],
+      raw: true,
+    });
+
+    const questionIds = details
+      .map((item) => Number(item.cau_hoi_id))
+      .filter((item) => Number.isInteger(item) && item > 0);
+
+    const questionRows = questionIds.length
+      ? await CauHoi.findAll({
+          where: { id: { [Op.in]: questionIds } },
+          attributes: [
+            "id",
+            "noi_dung",
+            "dap_an_a",
+            "dap_an_b",
+            "dap_an_c",
+            "dap_an_d",
+            "dap_an_dung",
+          ],
+          raw: true,
+        })
+      : [];
+
+    const questionMap = new Map(questionRows.map((item) => [Number(item.id), item]));
+
+    const answerDetails = details.map((item, index) => {
+      const question = questionMap.get(Number(item.cau_hoi_id));
+      return {
+        questionNumber: index + 1,
+        questionId: Number(item.cau_hoi_id),
+        questionContent: question?.noi_dung || "",
+        options: {
+          A: question?.dap_an_a || "",
+          B: question?.dap_an_b || "",
+          C: question?.dap_an_c || "",
+          D: question?.dap_an_d || "",
+        },
+        selectedAnswer: item.dap_an_chon || null,
+        correctAnswer: question?.dap_an_dung || null,
+        isCorrect: Boolean(item.dung_sai),
+      };
+    });
+
+    const correctAnswers = answerDetails.filter((item) => item.isCorrect).length;
+
+    return res.status(200).json({
+      exam: {
+        id: exam.id,
+        name: exam.ten_ky_thi,
+      },
+      submission: {
+        id: attempt.id,
+        studentId: student?.mssv || `ID-${attempt.sinh_vien_id}`,
+        studentName: student?.ho_ten || "Không xác định",
+        score: attempt.tong_diem,
+        submitTime: attempt.thoi_gian_nop || attempt.updated_at,
+        totalQuestions: answerDetails.length,
+        correctAnswers,
+      },
+      answers: answerDetails,
+    });
+  } catch (error) {
+    console.error("getExamGradingResultDetail error:", error);
+    return res.status(500).json({ message: "Lỗi khi lấy chi tiết bài làm" });
   }
 };
 
@@ -1562,6 +1708,10 @@ export const downloadOmrSheet = async (req, res) => {
 
 export const uploadOmrImage = async (req, res) => {
   try {
+    console.log("📤 [uploadOmrImage] Request received");
+    console.log("   Exam ID:", req.params.id);
+    console.log("   File:", req.file?.originalname);
+    
     const { id } = req.params;
     const exam = await KyThi.findByPk(id);
 
@@ -1624,13 +1774,54 @@ export const uploadOmrImage = async (req, res) => {
       });
     }
 
-    const gradingResult = await gradeOmrAttempt({
-      examId: exam.id,
-      fileOmrId: fileRecord.id,
-      mssv: scanPayload.mssv,
-      maDe: scanPayload.maDe,
-      answersInput: scanPayload.answersInput,
-    });
+    const manualMssv =
+      req.body?.mssv_override ?? req.body?.mssvOverride ?? req.body?.mssv ?? null;
+    const manualMaDe =
+      req.body?.ma_de_override ?? req.body?.maDeOverride ?? req.body?.ma_de ?? req.body?.maDe ?? null;
+    if (manualMssv) {
+      scanPayload.mssv = String(manualMssv).trim();
+    }
+    if (manualMaDe) {
+      scanPayload.maDe = String(manualMaDe).trim();
+    }
+
+    let gradingResult = null;
+    try {
+      gradingResult = await gradeOmrAttempt({
+        examId: exam.id,
+        fileOmrId: fileRecord.id,
+        mssv: scanPayload.mssv,
+        maDe: scanPayload.maDe,
+        answersInput: scanPayload.answersInput,
+      });
+    } catch (gradeError) {
+      const message = String(gradeError?.message || "");
+      if (message.includes("Không tìm thấy sinh viên")) {
+        return res.status(202).json({
+          message: "Đã tải ảnh và quét xong, nhưng chưa gán được sinh viên theo MSSV quét được",
+          file: {
+            id: fileRecord.id,
+            ten_file: fileRecord.ten_file,
+            duong_dan: fileRecord.duong_dan,
+          },
+          auto_grade: {
+            status: "pending_student_match",
+            reason: message,
+            scanned: {
+              mssv: scanPayload.mssv,
+              maDe: scanPayload.maDe || null,
+              manualMssvApplied: Boolean(manualMssv),
+              manualMaDeApplied: Boolean(manualMaDe),
+              answersCount: Array.isArray(scanPayload.answersInput)
+                ? scanPayload.answersInput.filter(Boolean).length
+                : null,
+            },
+          },
+        });
+      }
+
+      throw gradeError;
+    }
 
     return res.status(201).json({
       message: "Đã tải ảnh OMR, tự động chấm điểm và lưu kết quả",
