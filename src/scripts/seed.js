@@ -36,6 +36,9 @@ const seed = async () => {
     await sequelize.query(
       "ALTER TABLE lop_hoc ADD COLUMN IF NOT EXISTS nam_hoc VARCHAR(20) NULL"
     );
+    await sequelize.query(
+      "ALTER TABLE tai_khoan ADD COLUMN IF NOT EXISTS so_lan_sai INT NOT NULL DEFAULT 0"
+    );
 
     await sequelize.sync();
 

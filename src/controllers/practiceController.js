@@ -6,6 +6,7 @@ import {
   ChiTietBaiLuyenTap,
   CauHoi,
   LopHoc,
+  LopSinhVien,
   User,
 } from "../models/index.js";
 
@@ -13,6 +14,23 @@ const toPositiveInt = (value, fallback = 0) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return Math.floor(parsed);
+};
+
+const toBoolean = (value, fallback = false) => {
+  if (typeof value === "boolean") return value;
+
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) return fallback;
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off", ""].includes(normalized)) return false;
+  }
+
+  return fallback;
 };
 
 const uniqueNumberArray = (value) => {
@@ -43,6 +61,29 @@ const resolveStudentUserId = async (req, explicitUserId = null) => {
   return getUserIdFromAccount(req.user.id);
 };
 
+const getAssignedClassIdsForStudent = async (req) => {
+  const studentId = await resolveStudentUserId(req);
+  if (!studentId) return [];
+
+  const assignments = await LopSinhVien.findAll({
+    where: { sinh_vien_id: studentId },
+    attributes: ["lop_id"],
+    raw: true,
+  });
+
+  return [...new Set(
+    assignments
+      .map((item) => Number(item.lop_id))
+      .filter((item) => Number.isInteger(item) && item > 0)
+  )];
+};
+
+const badRequestError = (message) => {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+};
+
 const normalizePracticeConfigInput = (body = {}, existing = {}) => {
   const input = body.cau_hinh || {};
 
@@ -61,8 +102,8 @@ const normalizePracticeConfigInput = (body = {}, existing = {}) => {
     nam_hoc: input.nam_hoc ?? body.nam_hoc ?? existing.nam_hoc ?? null,
     tong_so_cau: tongSoCau,
     cach_tao_de: cachTaoDe,
-    tron_cau_hoi: Boolean(input.tron_cau_hoi ?? existing.tron_cau_hoi ?? true),
-    tron_dap_an: Boolean(input.tron_dap_an ?? existing.tron_dap_an ?? true),
+    tron_cau_hoi: toBoolean(input.tron_cau_hoi ?? existing.tron_cau_hoi, true),
+    tron_dap_an: toBoolean(input.tron_dap_an ?? existing.tron_dap_an, true),
     so_cau_de: toPositiveInt(input.so_cau_de ?? existing.so_cau_de, Math.floor(tongSoCau / 3)),
     so_cau_trung_binh: toPositiveInt(
       input.so_cau_trung_binh ?? existing.so_cau_trung_binh,
@@ -74,10 +115,11 @@ const normalizePracticeConfigInput = (body = {}, existing = {}) => {
     ),
     ds_chuong: uniqueNumberArray(input.ds_chuong ?? existing.ds_chuong),
     ds_cau_hoi_chon: uniqueNumberArray(input.ds_cau_hoi_chon ?? existing.ds_cau_hoi_chon),
-    cho_phep_lam_lai: Boolean(input.cho_phep_lam_lai ?? existing.cho_phep_lam_lai ?? true),
-    cho_xem_chi_tiet: Boolean(input.cho_xem_chi_tiet ?? existing.cho_xem_chi_tiet ?? true),
-    cho_xem_dap_an_dung: Boolean(
-      input.cho_xem_dap_an_dung ?? existing.cho_xem_dap_an_dung ?? true
+    cho_phep_lam_lai: toBoolean(input.cho_phep_lam_lai ?? existing.cho_phep_lam_lai, true),
+    cho_xem_chi_tiet: toBoolean(input.cho_xem_chi_tiet ?? existing.cho_xem_chi_tiet, true),
+    cho_xem_dap_an_dung: toBoolean(
+      input.cho_xem_dap_an_dung ?? existing.cho_xem_dap_an_dung,
+      true
     ),
   };
 };
@@ -94,7 +136,13 @@ const resolvePracticeQuestionIds = async ({ monHocId, teacherUserId, config }) =
   if (config.cach_tao_de === "manual") {
     const selectedIds = uniqueNumberArray(config.ds_cau_hoi_chon);
     if (selectedIds.length === 0) {
-      throw new Error("Bạn chưa chọn câu hỏi thủ công");
+      throw badRequestError("Bạn chưa chọn câu hỏi thủ công");
+    }
+
+    if (selectedIds.length !== config.tong_so_cau) {
+      throw badRequestError(
+        "Tổng số câu phải bằng số câu hỏi đã chọn. Vui lòng chọn thêm câu hỏi hoặc giảm tổng số câu"
+      );
     }
 
     const rows = await CauHoi.findAll({
@@ -107,11 +155,11 @@ const resolvePracticeQuestionIds = async ({ monHocId, teacherUserId, config }) =
     });
 
     const existingIds = rows.map((item) => Number(item.id));
-    if (existingIds.length === 0) {
-      throw new Error("Không tìm thấy câu hỏi phù hợp với lựa chọn thủ công");
+    if (existingIds.length !== selectedIds.length) {
+      throw badRequestError("Có câu hỏi không hợp lệ hoặc không thuộc quyền giảng viên");
     }
 
-    return existingIds.slice(0, config.tong_so_cau);
+    return existingIds;
   }
 
   const autoWhere = { ...baseWhere };
@@ -126,7 +174,13 @@ const resolvePracticeQuestionIds = async ({ monHocId, teacherUserId, config }) =
   });
 
   if (pool.length === 0) {
-    throw new Error("Không có câu hỏi phù hợp để tạo bài luyện tập");
+    throw badRequestError("Không có câu hỏi phù hợp để tạo bài luyện tập");
+  }
+
+  if (pool.length < config.tong_so_cau) {
+    throw badRequestError(
+      "Tổng số câu lớn hơn số câu hiện có. Vui lòng giảm tổng số câu hoặc bổ sung câu hỏi"
+    );
   }
 
   const easy = pool.filter((q) => Number(q.do_kho) === 1);
@@ -226,7 +280,7 @@ export const createPractice = async (req, res) => {
     });
   } catch (error) {
     console.error("Error creating practice:", error);
-    res.status(500).json({
+    res.status(error?.statusCode || 500).json({
       success: false,
       error: error.message,
     });
@@ -238,7 +292,39 @@ export const getPracticeList = async (req, res) => {
     const { lop_id, mon_hoc_id, semester, academicYear } = req.query;
 
     const whereClause = {};
-    if (lop_id) whereClause.lop_id = Number(lop_id);
+    let assignedClassIds = null;
+
+    if (req.user?.role === "sinhvien") {
+      assignedClassIds = await getAssignedClassIdsForStudent(req);
+      if (assignedClassIds.length === 0) {
+        return res.json({
+          success: true,
+          data: [],
+        });
+      }
+    }
+
+    if (lop_id) {
+      const parsedClassId = Number(lop_id);
+      if (!Number.isInteger(parsedClassId) || parsedClassId <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: "lop_id không hợp lệ",
+        });
+      }
+
+      if (Array.isArray(assignedClassIds) && !assignedClassIds.includes(parsedClassId)) {
+        return res.json({
+          success: true,
+          data: [],
+        });
+      }
+
+      whereClause.lop_id = parsedClassId;
+    } else if (Array.isArray(assignedClassIds)) {
+      whereClause.lop_id = { [Op.in]: assignedClassIds };
+    }
+
     if (mon_hoc_id) whereClause.mon_hoc_id = Number(mon_hoc_id);
 
     const classWhere = {};
@@ -361,7 +447,7 @@ export const updatePractice = async (req, res) => {
     });
   } catch (error) {
     console.error("Error updating practice:", error);
-    res.status(500).json({
+    res.status(error?.statusCode || 500).json({
       success: false,
       error: error.message,
     });
@@ -417,8 +503,27 @@ export const startPractice = async (req, res) => {
       });
     }
 
+    if (req.user?.role === "sinhvien") {
+      const assigned = await LopSinhVien.findOne({
+        where: {
+          lop_id: practice.lop_id,
+          sinh_vien_id,
+        },
+        raw: true,
+      });
+
+      if (!assigned) {
+        return res.status(403).json({
+          success: false,
+          error: "Bạn không thuộc lớp của bài luyện tập này",
+        });
+      }
+    }
+
     const config = practice.cau_hinh || {};
-    if (!config.cho_phep_lam_lai) {
+    const allowRetry = toBoolean(config.cho_phep_lam_lai, true);
+
+    if (!allowRetry) {
       const doneCount = await LichSuBaiLuyenTap.count({
         where: {
           bai_luyen_tap_id,
@@ -442,7 +547,43 @@ export const startPractice = async (req, res) => {
       trang_thai: "dang_lam",
     });
 
-    const questionIds = uniqueNumberArray(config.ds_cau_hoi_chon);
+    let questionIds = uniqueNumberArray(config.ds_cau_hoi_chon);
+
+    // Fallback for legacy practices where cau_hinh.ds_cau_hoi_chon is empty.
+    if (questionIds.length === 0) {
+      const fallbackWhere = {};
+
+      if (practice.mon_hoc_id) {
+        fallbackWhere.mon_hoc_id = practice.mon_hoc_id;
+      }
+
+      if (Array.isArray(config.ds_chuong) && config.ds_chuong.length > 0) {
+        fallbackWhere.chuong = { [Op.in]: uniqueNumberArray(config.ds_chuong) };
+      }
+
+      const fallbackLimit = Math.max(
+        1,
+        toPositiveInt(config.tong_so_cau ?? practice.so_cau, practice.so_cau || 30)
+      );
+
+      const fallbackRows = await CauHoi.findAll({
+        where: fallbackWhere,
+        attributes: ["id"],
+        order: [["id", "ASC"]],
+        limit: fallbackLimit,
+        raw: true,
+      });
+
+      questionIds = fallbackRows.map((item) => Number(item.id));
+    }
+
+    if (questionIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Bài luyện tập chưa có câu hỏi",
+      });
+    }
+
     const questions = await CauHoi.findAll({
       where: { id: { [Op.in]: questionIds } },
       attributes: [
@@ -512,9 +653,31 @@ export const submitPractice = async (req, res) => {
       });
     }
 
-    const allowedQuestionIds = uniqueNumberArray(
+    let allowedQuestionIds = uniqueNumberArray(
       history.bai_luyen_tap?.cau_hinh?.ds_cau_hoi_chon || []
     );
+
+    if (allowedQuestionIds.length === 0) {
+      const fallbackLimit = Math.max(
+        1,
+        toPositiveInt(
+          history.bai_luyen_tap?.cau_hinh?.tong_so_cau ?? history.bai_luyen_tap?.so_cau,
+          history.bai_luyen_tap?.so_cau || 30
+        )
+      );
+
+      const fallbackRows = await CauHoi.findAll({
+        where: history.bai_luyen_tap?.mon_hoc_id
+          ? { mon_hoc_id: history.bai_luyen_tap.mon_hoc_id }
+          : {},
+        attributes: ["id"],
+        order: [["id", "ASC"]],
+        limit: fallbackLimit,
+        raw: true,
+      });
+
+      allowedQuestionIds = fallbackRows.map((item) => Number(item.id));
+    }
 
     if (allowedQuestionIds.length === 0) {
       return res.status(400).json({
@@ -802,8 +965,8 @@ export const getStudentPracticeStatistics = async (req, res) => {
       thoi_gian_bat_dau: item.thoi_gian_bat_dau,
       thoi_gian_nop: item.thoi_gian_nop,
       trang_thai: item.trang_thai,
-      cho_xem_chi_tiet: Boolean(item.bai_luyen_tap?.cau_hinh?.cho_xem_chi_tiet),
-      cho_xem_dap_an_dung: Boolean(item.bai_luyen_tap?.cau_hinh?.cho_xem_dap_an_dung),
+      cho_xem_chi_tiet: toBoolean(item.bai_luyen_tap?.cau_hinh?.cho_xem_chi_tiet, true),
+      cho_xem_dap_an_dung: toBoolean(item.bai_luyen_tap?.cau_hinh?.cho_xem_dap_an_dung, true),
     }));
 
     res.json({

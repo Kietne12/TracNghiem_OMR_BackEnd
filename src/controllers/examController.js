@@ -7,6 +7,7 @@ import {
   sequelize,
   Account,
   KyThi,
+  MonHoc,
   LopHoc,
   LopSinhVien,
   User,
@@ -23,6 +24,23 @@ const toPositiveInt = (value, defaultValue = 0) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return defaultValue;
   return Math.floor(parsed);
+};
+
+const toBoolean = (value, fallback = false) => {
+  if (typeof value === "boolean") return value;
+
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) return fallback;
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off", ""].includes(normalized)) return false;
+  }
+
+  return fallback;
 };
 
 const uniqueNumberArray = (values) => {
@@ -48,6 +66,40 @@ const getTeacherUserId = async (accountId) => {
   const account = await Account.findByPk(accountId);
   if (!account) return null;
   return account.user_id;
+};
+
+const resolveStudentUserId = async (req, explicitUserId = null) => {
+  if (explicitUserId) {
+    const parsed = Number(explicitUserId);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  if (!req.user?.id) return null;
+  const account = await Account.findByPk(req.user.id, { raw: true });
+  return account?.user_id || null;
+};
+
+const badRequestError = (message) => {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+};
+
+const getAssignedClassIdsForStudent = async (req) => {
+  const studentId = await resolveStudentUserId(req);
+  if (!studentId) return [];
+
+  const assignments = await LopSinhVien.findAll({
+    where: { sinh_vien_id: studentId },
+    attributes: ["lop_id"],
+    raw: true,
+  });
+
+  return [...new Set(
+    assignments
+      .map((item) => Number(item.lop_id))
+      .filter((item) => Number.isInteger(item) && item > 0)
+  )];
 };
 
 const ANSWER_LETTERS = ["A", "B", "C", "D"];
@@ -554,8 +606,8 @@ const normalizeExamConfigInput = (body = {}, existingConfig = null) => {
       (input.cach_tao_de || existingConfig?.cach_tao_de || "auto").toLowerCase() === "manual"
         ? "manual"
         : "auto",
-    tron_cau_hoi: Boolean(input.tron_cau_hoi ?? existingConfig?.tron_cau_hoi ?? false),
-    tron_dap_an: Boolean(input.tron_dap_an ?? existingConfig?.tron_dap_an ?? false),
+    tron_cau_hoi: toBoolean(input.tron_cau_hoi ?? existingConfig?.tron_cau_hoi, false),
+    tron_dap_an: toBoolean(input.tron_dap_an ?? existingConfig?.tron_dap_an, false),
     so_ma_de: Math.max(
       1,
       toPositiveInt(input.so_ma_de ?? existingConfig?.so_ma_de, 1)
@@ -593,11 +645,13 @@ const resolveQuestionIds = async ({
 
   if (config.cach_tao_de === "manual") {
     if (config.ds_cau_hoi_chon.length === 0) {
-      throw new Error("Bạn chưa chọn câu hỏi cho chế độ thủ công");
+      throw badRequestError("Bạn chưa chọn câu hỏi cho chế độ thủ công");
     }
 
     if (config.ds_cau_hoi_chon.length !== config.tong_so_cau) {
-      throw new Error("Tổng số câu phải bằng số câu đã chọn thủ công");
+      throw badRequestError(
+        "Tổng số câu phải bằng số câu hỏi đã chọn. Vui lòng chọn thêm câu hỏi hoặc giảm tổng số câu"
+      );
     }
 
     const manualQuestions = await CauHoi.findAll({
@@ -609,7 +663,7 @@ const resolveQuestionIds = async ({
     });
 
     if (manualQuestions.length !== config.ds_cau_hoi_chon.length) {
-      throw new Error("Có câu hỏi thủ công không hợp lệ hoặc không thuộc quyền giảng viên");
+      throw badRequestError("Có câu hỏi thủ công không hợp lệ hoặc không thuộc quyền giảng viên");
     }
 
     return config.ds_cau_hoi_chon;
@@ -621,7 +675,9 @@ const resolveQuestionIds = async ({
   });
 
   if (questionPool.length < config.tong_so_cau) {
-    throw new Error("Không đủ số lượng câu hỏi trong ngân hàng để sinh đề");
+    throw badRequestError(
+      "Tổng số câu lớn hơn số câu hiện có. Vui lòng giảm tổng số câu hoặc bổ sung câu hỏi"
+    );
   }
 
   let easy = config.so_cau_de;
@@ -635,7 +691,7 @@ const resolveQuestionIds = async ({
   }
 
   if (requested > config.tong_so_cau) {
-    throw new Error("Tổng số câu theo độ khó không được vượt quá tổng số câu đề thi");
+    throw badRequestError("Tổng số câu theo độ khó không được vượt quá tổng số câu đề thi");
   }
 
   const easyPool = questionPool.filter((q) => Number(q.do_kho) === 1);
@@ -643,7 +699,7 @@ const resolveQuestionIds = async ({
   const hardPool = questionPool.filter((q) => Number(q.do_kho) === 3);
 
   if (easyPool.length < easy || mediumPool.length < medium || hardPool.length < hard) {
-    throw new Error("Không đủ câu hỏi theo phân bố độ khó đã chọn");
+    throw badRequestError("Không đủ câu hỏi theo phân bố độ khó đã chọn");
   }
 
   const selected = [
@@ -658,7 +714,7 @@ const resolveQuestionIds = async ({
   if (remainingNeeded > 0) {
     const leftovers = questionPool.filter((q) => !selectedIdsSet.has(q.id));
     if (leftovers.length < remainingNeeded) {
-      throw new Error("Không đủ câu hỏi để hoàn tất đề theo tổng số câu yêu cầu");
+      throw badRequestError("Không đủ câu hỏi để hoàn tất đề theo tổng số câu yêu cầu");
     }
     selected.push(...pickRandom(leftovers, remainingNeeded));
   }
@@ -759,6 +815,16 @@ export const getClasses = async (req, res) => {
       whereClause.nam_hoc = academicYear;
     }
 
+    if (req.user?.role === "sinhvien") {
+      const assignedClassIds = await getAssignedClassIdsForStudent(req);
+
+      if (assignedClassIds.length === 0) {
+        return res.status(200).json({ classes: [] });
+      }
+
+      whereClause.id = { [Op.in]: assignedClassIds };
+    }
+
     const classes = await LopHoc.findAll({
       where: whereClause,
       attributes: classAttributes,
@@ -795,13 +861,28 @@ export const getExams = async (req, res) => {
   try {
     const { lop_id } = req.query;
     const whereClause = {};
+    let assignedClassIds = null;
+
+    if (req.user?.role === "sinhvien") {
+      assignedClassIds = await getAssignedClassIdsForStudent(req);
+      if (assignedClassIds.length === 0) {
+        return res.json({ exams: [] });
+      }
+    }
 
     if (lop_id) {
       const parsedClassId = Number(lop_id);
       if (!Number.isInteger(parsedClassId) || parsedClassId <= 0) {
         return res.status(400).json({ message: "lop_id không hợp lệ" });
       }
+
+      if (Array.isArray(assignedClassIds) && !assignedClassIds.includes(parsedClassId)) {
+        return res.json({ exams: [] });
+      }
+
       whereClause.lop_id = parsedClassId;
+    } else if (Array.isArray(assignedClassIds)) {
+      whereClause.lop_id = { [Op.in]: assignedClassIds };
     }
 
     const exams = await KyThi.findAll({
@@ -834,6 +915,202 @@ export const getExams = async (req, res) => {
   }
 };
 
+export const getStudentExamHistory = async (req, res) => {
+  try {
+    const studentId = await resolveStudentUserId(req, req.params.sinh_vien_id);
+
+    if (!studentId) {
+      return res.status(400).json({ message: "Không xác định được sinh viên" });
+    }
+
+    const attempts = await BaiLam.findAll({
+      where: { sinh_vien_id: studentId },
+      order: [["createdAt", "DESC"]],
+      raw: true,
+    });
+
+    if (attempts.length === 0) {
+      return res.status(200).json({ history: [] });
+    }
+
+    const examIds = [...new Set(attempts.map((item) => Number(item.ky_thi_id)).filter((id) => Number.isInteger(id) && id > 0))];
+
+    const exams = await KyThi.findAll({
+      where: { id: { [Op.in]: examIds } },
+      raw: true,
+    });
+
+    const classIds = [...new Set(exams.map((item) => Number(item.lop_id)).filter((id) => Number.isInteger(id) && id > 0))];
+    const subjectIds = [...new Set(exams.map((item) => Number(item.mon_hoc_id)).filter((id) => Number.isInteger(id) && id > 0))];
+
+    const [classes, subjects] = await Promise.all([
+      classIds.length > 0
+        ? LopHoc.findAll({
+            where: { id: { [Op.in]: classIds } },
+            attributes: ["id", "ten_lop", "hoc_ky", "nam_hoc"],
+            raw: true,
+          })
+        : Promise.resolve([]),
+      subjectIds.length > 0
+        ? MonHoc.findAll({
+            where: { id: { [Op.in]: subjectIds } },
+            attributes: ["id", "ten_mon_hoc"],
+            raw: true,
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const examMap = new Map(exams.map((item) => [Number(item.id), item]));
+    const classMap = new Map(classes.map((item) => [Number(item.id), item]));
+    const subjectMap = new Map(subjects.map((item) => [Number(item.id), item]));
+
+    const history = attempts.map((attempt) => {
+      const exam = examMap.get(Number(attempt.ky_thi_id));
+      const classInfo = exam ? classMap.get(Number(exam.lop_id)) : null;
+      const subjectInfo = exam ? subjectMap.get(Number(exam.mon_hoc_id)) : null;
+
+      let durationMinutes = null;
+      if (attempt.thoi_gian_bat_dau && attempt.thoi_gian_nop) {
+        const start = new Date(attempt.thoi_gian_bat_dau).getTime();
+        const end = new Date(attempt.thoi_gian_nop).getTime();
+        if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+          durationMinutes = Math.round((end - start) / 60000);
+        }
+      }
+
+      return {
+        id: attempt.id,
+        ky_thi_id: attempt.ky_thi_id,
+        ten_ky_thi: exam?.ten_ky_thi || "--",
+        mon_hoc: subjectInfo?.ten_mon_hoc || "--",
+        lop_hoc: classInfo?.ten_lop || "--",
+        hoc_ky: classInfo?.hoc_ky || null,
+        nam_hoc: classInfo?.nam_hoc || null,
+        thoi_gian_bat_dau: attempt.thoi_gian_bat_dau,
+        thoi_gian_nop: attempt.thoi_gian_nop,
+        thoi_gian_lam_bai: durationMinutes,
+        tong_diem: attempt.tong_diem,
+      };
+    });
+
+    return res.status(200).json({ history });
+  } catch (error) {
+    console.error("getStudentExamHistory error:", error);
+    return res.status(500).json({ message: "Lỗi lấy lịch sử làm bài" });
+  }
+};
+
+export const getStudentExamAttemptDetail = async (req, res) => {
+  try {
+    const attemptId = Number(req.params.attemptId);
+    if (!Number.isInteger(attemptId) || attemptId <= 0) {
+      return res.status(400).json({ message: "attemptId không hợp lệ" });
+    }
+
+    const studentId = await resolveStudentUserId(req, req.params.sinh_vien_id);
+    if (!studentId) {
+      return res.status(400).json({ message: "Không xác định được sinh viên" });
+    }
+
+    const attempt = await BaiLam.findByPk(attemptId, { raw: true });
+    if (!attempt) {
+      return res.status(404).json({ message: "Không tìm thấy bài làm" });
+    }
+
+    if (Number(attempt.sinh_vien_id) !== Number(studentId)) {
+      return res.status(403).json({ message: "Bạn không có quyền xem bài làm này" });
+    }
+
+    const [exam, student, details] = await Promise.all([
+      KyThi.findByPk(attempt.ky_thi_id, { raw: true }),
+      User.findByPk(attempt.sinh_vien_id, {
+        attributes: ["id", "mssv", "ho_ten"],
+        raw: true,
+      }),
+      ChiTietBaiLam.findAll({
+        where: { bai_lam_id: attempt.id },
+        attributes: ["id", "cau_hoi_id", "dap_an_chon", "dung_sai"],
+        order: [["id", "ASC"]],
+        raw: true,
+      }),
+    ]);
+
+    if (!exam) {
+      return res.status(404).json({ message: "Không tìm thấy kỳ thi" });
+    }
+
+    const [lop, monHoc] = await Promise.all([
+      exam.lop_id ? LopHoc.findByPk(exam.lop_id, { raw: true }) : Promise.resolve(null),
+      exam.mon_hoc_id ? MonHoc.findByPk(exam.mon_hoc_id, { raw: true }) : Promise.resolve(null),
+    ]);
+
+    const questionIds = details
+      .map((item) => Number(item.cau_hoi_id))
+      .filter((item) => Number.isInteger(item) && item > 0);
+
+    const questionRows = questionIds.length
+      ? await CauHoi.findAll({
+          where: { id: { [Op.in]: questionIds } },
+          attributes: [
+            "id",
+            "noi_dung",
+            "dap_an_a",
+            "dap_an_b",
+            "dap_an_c",
+            "dap_an_d",
+            "dap_an_dung",
+          ],
+          raw: true,
+        })
+      : [];
+
+    const questionMap = new Map(questionRows.map((item) => [Number(item.id), item]));
+
+    const answers = details.map((item, index) => {
+      const question = questionMap.get(Number(item.cau_hoi_id));
+
+      return {
+        questionNumber: index + 1,
+        questionId: Number(item.cau_hoi_id),
+        questionContent: question?.noi_dung || "",
+        options: {
+          A: question?.dap_an_a || "",
+          B: question?.dap_an_b || "",
+          C: question?.dap_an_c || "",
+          D: question?.dap_an_d || "",
+        },
+        selectedAnswer: item.dap_an_chon || null,
+        correctAnswer: question?.dap_an_dung || null,
+        isCorrect: Boolean(item.dung_sai),
+      };
+    });
+
+    const correctAnswers = answers.filter((item) => item.isCorrect).length;
+
+    return res.status(200).json({
+      exam: {
+        id: exam.id,
+        name: exam.ten_ky_thi,
+        mon_hoc: monHoc?.ten_mon_hoc || null,
+        lop_hoc: lop?.ten_lop || null,
+      },
+      submission: {
+        id: attempt.id,
+        studentId: student?.mssv || `ID-${attempt.sinh_vien_id}`,
+        studentName: student?.ho_ten || "Không xác định",
+        score: attempt.tong_diem,
+        submitTime: attempt.thoi_gian_nop || attempt.updated_at,
+        totalQuestions: answers.length,
+        correctAnswers,
+      },
+      answers,
+    });
+  } catch (error) {
+    console.error("getStudentExamAttemptDetail error:", error);
+    return res.status(500).json({ message: "Lỗi khi lấy chi tiết bài làm" });
+  }
+};
+
 // ===== GET EXAM BY ID =====
 export const getExamById = async (req, res) => {
   try {
@@ -843,6 +1120,25 @@ export const getExamById = async (req, res) => {
       return res.status(404).json({ message: "Không tìm thấy kỳ thi" });
     }
 
+    if (req.user?.role === "sinhvien") {
+      const studentId = await resolveStudentUserId(req);
+      if (!studentId) {
+        return res.status(400).json({ message: "Không xác định được sinh viên" });
+      }
+
+      const assigned = await LopSinhVien.findOne({
+        where: {
+          lop_id: exam.lop_id,
+          sinh_vien_id: studentId,
+        },
+        raw: true,
+      });
+
+      if (!assigned) {
+        return res.status(403).json({ message: "Bạn không thuộc lớp của kỳ thi này" });
+      }
+    }
+
     const config = await CauHinhKyThi.findOne({
       where: { ky_thi_id: exam.id },
       raw: true,
@@ -850,10 +1146,21 @@ export const getExamById = async (req, res) => {
 
     const examQuestions = await CauHoiKyThi.findAll({
       where: { ky_thi_id: exam.id },
+      attributes: ["id", "cau_hoi_id"],
+      order: [["id", "ASC"]],
       include: [
         {
           model: CauHoi,
-          attributes: ["id", "noi_dung", "do_kho", "chuong"],
+          attributes: [
+            "id",
+            "noi_dung",
+            "dap_an_a",
+            "dap_an_b",
+            "dap_an_c",
+            "dap_an_d",
+            "do_kho",
+            "chuong",
+          ],
         },
       ],
     });
@@ -870,7 +1177,111 @@ export const getExamById = async (req, res) => {
 
 // ===== SUBMIT EXAM =====
 export const submitExam = async (req, res) => {
-  res.json({ message: "Submit chưa làm 😅" });
+  try {
+    const examId = Number(req.params.id);
+    if (!Number.isInteger(examId) || examId <= 0) {
+      return res.status(400).json({ message: "Mã kỳ thi không hợp lệ" });
+    }
+
+    const studentId = await resolveStudentUserId(req, req.body?.sinh_vien_id);
+    if (!studentId) {
+      return res.status(400).json({ message: "Không xác định được sinh viên" });
+    }
+
+    const rawAnswers = req.body?.answers;
+    if (!Array.isArray(rawAnswers) || rawAnswers.length === 0) {
+      return res.status(400).json({ message: "Danh sách đáp án không hợp lệ" });
+    }
+
+    const examQuestions = await CauHoiKyThi.findAll({
+      where: { ky_thi_id: examId },
+      attributes: ["cau_hoi_id"],
+      include: [
+        {
+          model: CauHoi,
+          attributes: ["id", "dap_an_dung"],
+        },
+      ],
+    });
+
+    if (examQuestions.length === 0) {
+      return res.status(400).json({ message: "Kỳ thi chưa có câu hỏi" });
+    }
+
+    const answersMap = new Map();
+    rawAnswers.forEach((item) => {
+      const questionId = Number(item?.cau_hoi_id);
+      if (!Number.isInteger(questionId) || questionId <= 0) return;
+
+      const normalized = String(item?.dap_an_student || "")
+        .trim()
+        .toUpperCase();
+
+      answersMap.set(
+        questionId,
+        ["A", "B", "C", "D"].includes(normalized) ? normalized : null
+      );
+    });
+
+    let correctCount = 0;
+    const details = examQuestions.map((item) => {
+      const questionId = Number(item.cau_hoi_id);
+      const correctAnswer = String(item.cau_hoi?.dap_an_dung || "")
+        .trim()
+        .toUpperCase();
+      const selected = answersMap.has(questionId) ? answersMap.get(questionId) : null;
+      const isCorrect = Boolean(selected && selected === correctAnswer);
+
+      if (isCorrect) correctCount += 1;
+
+      return {
+        cau_hoi_id: questionId,
+        dap_an_chon: selected,
+        dung_sai: isCorrect,
+      };
+    });
+
+    const totalQuestions = examQuestions.length;
+    const score = Number(((correctCount / totalQuestions) * 10).toFixed(2));
+
+    const timeUsedSec = Number(req.body?.time_used_sec);
+    const endedAt = new Date();
+    const startedAt =
+      Number.isFinite(timeUsedSec) && timeUsedSec > 0
+        ? new Date(endedAt.getTime() - Math.floor(timeUsedSec) * 1000)
+        : new Date();
+
+    const attempt = await BaiLam.create({
+      ky_thi_id: examId,
+      sinh_vien_id: studentId,
+      thoi_gian_bat_dau: startedAt,
+      thoi_gian_nop: endedAt,
+      tong_diem: score,
+    });
+
+    await ChiTietBaiLam.bulkCreate(
+      details.map((item) => ({
+        bai_lam_id: attempt.id,
+        cau_hoi_id: item.cau_hoi_id,
+        dap_an_chon: item.dap_an_chon,
+        dung_sai: item.dung_sai,
+      }))
+    );
+
+    return res.status(200).json({
+      message: "Nộp bài thành công",
+      result: {
+        attempt_id: attempt.id,
+        correct: correctCount,
+        total: totalQuestions,
+        score,
+        timeUsed: Number.isFinite(timeUsedSec) && timeUsedSec > 0 ? Math.floor(timeUsedSec) : null,
+      },
+    });
+  } catch (error) {
+    console.error("submitExam error:", error);
+    return res.status(500).json({ message: "Lỗi khi nộp bài" });
+  }
 };
 
 // ================== CREATE EXAM ==================
@@ -955,7 +1366,7 @@ export const createExam = async (req, res) => {
     });
   } catch (error) {
     console.error("createExam error:", error);
-    res.status(500).json({ message: error.message || "Lỗi server" });
+    res.status(error?.statusCode || 500).json({ message: error.message || "Lỗi server" });
   }
 };
 
@@ -1036,7 +1447,7 @@ export const updateExamConfig = async (req, res) => {
     });
   } catch (error) {
     console.error("updateExamConfig error:", error);
-    return res.status(500).json({ message: error.message || "Lỗi server" });
+    return res.status(error?.statusCode || 500).json({ message: error.message || "Lỗi server" });
   }
 };
 

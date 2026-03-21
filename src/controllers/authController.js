@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";
-import { Account, CaiDatHeThong } from "../models/index.js";
+import { Account, CaiDatHeThong, User } from "../models/index.js";
 
 /**
 
@@ -19,6 +19,13 @@ export const login = async (req, res) => {
 
     const account = await Account.findOne({
       where: { username },
+      include: [
+        {
+          model: User,
+          as: "nguoi_dung",
+          attributes: ["ho_ten", "email", "mssv"],
+        },
+      ],
     });
     console.log("username nhập:", username)
     console.log("password nhập:", password)
@@ -73,8 +80,12 @@ export const login = async (req, res) => {
       token,
       account: {
         id: account.id,
+        user_id: account.user_id,
         username: account.username,
         role: account.role,
+        ho_ten: account.nguoi_dung?.ho_ten || null,
+        email: account.nguoi_dung?.email || null,
+        mssv: account.nguoi_dung?.mssv || null,
       },
     });
   } catch (error) {
@@ -93,6 +104,13 @@ export const getMe = async (req, res) => {
   try {
     const account = await Account.findByPk(req.user.id, {
       attributes: { exclude: ["password"] },
+      include: [
+        {
+          model: User,
+          as: "nguoi_dung",
+          attributes: ["ho_ten", "email", "mssv"],
+        },
+      ],
     });
 
     if (!account) {
@@ -102,7 +120,16 @@ export const getMe = async (req, res) => {
     }
 
     return res.status(200).json({
-      account,
+      account: {
+        id: account.id,
+        user_id: account.user_id,
+        username: account.username,
+        role: account.role,
+        so_lan_sai: account.so_lan_sai,
+        ho_ten: account.nguoi_dung?.ho_ten || null,
+        email: account.nguoi_dung?.email || null,
+        mssv: account.nguoi_dung?.mssv || null,
+      },
     });
   } catch (error) {
     console.error("GetMe error:", error);

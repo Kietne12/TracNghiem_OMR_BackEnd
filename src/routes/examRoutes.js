@@ -5,6 +5,8 @@ import multer from "multer";
 import {
   createExam,
   getExams,
+  getStudentExamHistory,
+  getStudentExamAttemptDetail,
   getExamById,
   submitExam,
   getClasses,
@@ -41,6 +43,9 @@ router.get("/classes", getClasses);
 // ===== EXAMS =====
 router.post("/", createExam);
 router.get("/", getExams);
+router.get("/history/student", getStudentExamHistory);
+router.get("/history/student/:sinh_vien_id", getStudentExamHistory);
+router.get("/history/attempt/:attemptId", getStudentExamAttemptDetail);
 router.get("/:id", getExamById);
 router.put("/:id/config", updateExamConfig);
 router.delete("/:id", deleteExam);

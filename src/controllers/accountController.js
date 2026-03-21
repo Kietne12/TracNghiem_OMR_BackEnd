@@ -1,5 +1,39 @@
-import { User, Account } from "../models/index.js";
-import bcrypt from "bcrypt";
+import { User, Account, sequelize } from "../models/index.js";
+import { Op } from "sequelize";
+
+const parseNumericMssv = (value) => {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    return Number.parseInt(trimmed, 10);
+};
+
+const getNextStudentMssv = async () => {
+    const users = await User.findAll({
+        attributes: ["mssv"],
+        where: { mssv: { [Op.ne]: null } },
+        raw: true,
+    });
+
+    let maxNumeric = 0;
+    let maxLength = 4;
+
+    for (const row of users) {
+        const rawMssv = String(row.mssv || "").trim();
+        const parsed = parseNumericMssv(rawMssv);
+        if (parsed === null) continue;
+
+        if (parsed > maxNumeric) {
+            maxNumeric = parsed;
+        }
+
+        if (rawMssv.length > maxLength) {
+            maxLength = rawMssv.length;
+        }
+    }
+
+    return String(maxNumeric + 1).padStart(Math.max(4, maxLength), "0");
+};
 
 // GET ALL
 export const getAccounts = async (req, res) => {
@@ -17,24 +51,72 @@ export const getAccounts = async (req, res) => {
 
 // CREATE
 export const createAccount = async (req, res) => {
-    const { ho_ten, email, username, password, role } = req.body;
+    try {
+        const { ho_ten, email, username, password, role } = req.body;
 
-    const user = await User.create({
-        ho_ten,
-        email,
-        trang_thai: 1,
-    });
+        const existingEmail = await User.findOne({
+            where: { email },
+            attributes: ["id"],
+            raw: true,
+        });
 
-    const hashed = await bcrypt.hash(password, 10);
+        if (existingEmail) {
+            return res.status(400).json({ message: "Email đã tồn tại" });
+        }
 
-    await Account.create({
-        user_id: user.id,
-        username: username,
-        password: hashed,
-        role,
-    });
+        const existingUsername = await Account.findOne({
+            where: { username },
+            attributes: ["id"],
+            raw: true,
+        });
 
-    res.json({ message: "Tạo tài khoản thành công" });
+        if (existingUsername) {
+            return res.status(400).json({ message: "Username đã tồn tại" });
+        }
+
+        const tx = await sequelize.transaction();
+        try {
+            let generatedMssv = null;
+            if (role === "sinhvien") {
+                generatedMssv = await getNextStudentMssv();
+            }
+
+            const user = await User.create({
+                ho_ten,
+                email,
+                mssv: generatedMssv,
+                trang_thai: 1,
+            }, { transaction: tx });
+
+            await Account.create({
+                user_id: user.id,
+                username: username,
+                // Account model has beforeCreate hook to hash password.
+                password,
+                role,
+            }, { transaction: tx });
+
+            await tx.commit();
+            return res.json({ message: "Tạo tài khoản thành công" });
+        } catch (error) {
+            await tx.rollback();
+            throw error;
+        }
+    } catch (error) {
+        if (error?.name === "SequelizeUniqueConstraintError") {
+            const duplicateField = error?.errors?.[0]?.path;
+            if (duplicateField === "email") {
+                return res.status(400).json({ message: "Email đã tồn tại" });
+            }
+            if (duplicateField === "username") {
+                return res.status(400).json({ message: "Username đã tồn tại" });
+            }
+            return res.status(400).json({ message: "Dữ liệu bị trùng, vui lòng kiểm tra lại" });
+        }
+
+        console.error(error);
+        return res.status(500).json({ message: "Lỗi server" });
+    }
 };
 
 // UPDATE ACCOUNT
@@ -62,11 +144,12 @@ export const updateAccount = async (req, res) => {
                 username: username,
                 role: role,
                 ...(password && password.trim() !== ""
-                    ? { password: await bcrypt.hash(password, 10) }
+                    ? { password }
                     : {})
             },
             {
-                where: { user_id: id }
+                where: { user_id: id },
+                individualHooks: true,
             }
         )
 
