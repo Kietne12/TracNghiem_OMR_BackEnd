@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { DataTypes } from "sequelize";
 import { sequelize } from "./models/index.js";
+
 import authRoutes from "./routes/authRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import questionBankGiangVienRoutes from "./routes/questionBankGiangVienRoutes.js";
@@ -11,6 +12,9 @@ import examRoutes from "./routes/examRoutes.js";
 import omrRoutes from "./routes/omrRoutes.js";
 import practiceRoutes from "./routes/practiceRoutes.js";
 import { verifyToken } from "./middlewares/authMiddleware.js";
+import accountRoutes from "./routes/accountRoutes.js";
+import subjectRoutes from "./routes/subjectRoutes.js";
+import heThongRoutes from "./routes/heThongRoutes.js";
 
 dotenv.config();
 
@@ -26,13 +30,22 @@ app.use("/uploads", express.static(path.resolve("uploads")));
 // Cho phép truy cập các trang demo tĩnh (UI test nhanh ngay trong backend)
 app.use("/demo", express.static(path.resolve("public")));
 
-// Routes
+// =======================
+// ROUTES
+// =======================
+
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", verifyToken, dashboardRoutes);
 app.use("/api/question-bank", verifyToken, questionBankGiangVienRoutes);
 app.use("/api/exams", verifyToken, examRoutes);
 app.use("/api/omr", omrRoutes);
 app.use("/api/practice", practiceRoutes);
+
+// 🔥 THÊM DÒNG NÀY
+app.use("/api/admin/accounts", accountRoutes);
+app.use("/api/admin/subjects", subjectRoutes);
+app.use("/api/admin/system", heThongRoutes);
+app.use("/api/admin/dashboard", dashboardRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend running");
@@ -57,16 +70,11 @@ const ensureSchemaColumns = async () => {
   }
 };
 
-// Kiểm tra kết nối DB & đồng bộ models trước khi start server
 const startServer = async () => {
   try {
-    // Test kết nối
     await sequelize.authenticate();
     console.log("Kết nối MariaDB thành công!");
 
-    // Đồng bộ các models với database.
-    // fix: tránh lỗi MariaDB "Too many keys specified" khi tái tạo index qua alter.
-    // Dùng sync() mặc định -> chỉ tạo bảng khi chưa có.
     await sequelize.sync();
     console.log("Đồng bộ models thành công!");
 

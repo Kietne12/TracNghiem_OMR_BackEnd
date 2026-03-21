@@ -1,9 +1,31 @@
 import { Op, fn, col } from "sequelize";
-import { User, KyThi, CauHoi, BaiLam } from "../models/index.js";
+import { Account, User, KyThi, CauHoi, BaiLam } from "../models/index.js";
+
+export const getDashboard = async (req, res) => {
+  try {
+    const totalUsers = await Account.count();
+    const teachers = await Account.count({ where: { role: "giangvien" } });
+    const students = await Account.count({ where: { role: "sinhvien" } });
+
+    const recentActivities = [
+      { id: 1, action: "Tạo tài khoản", user: "Admin", time: "1 giờ trước" },
+      { id: 2, action: "Tạo môn học", user: "Admin", time: "2 giờ trước" },
+    ];
+
+    res.json({
+      totalUsers,
+      teachers,
+      students,
+      recentActivities,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Lỗi server" });
+  }
+};
 
 export const getDashboardStats = async (req, res) => {
   try {
-    // Số lượng sinh viên
     const studentsCount = await User.count({
       where: {
         mssv: {
@@ -12,13 +34,9 @@ export const getDashboardStats = async (req, res) => {
       },
     });
 
-    // Số lượng kỳ thi (tạm tính tất cả)
     const examsCreated = await KyThi.count();
-
-    // Số lượng câu hỏi (tạm tính tất cả)
     const questionsBank = await CauHoi.count();
 
-    // Điểm trung bình lớp (tính trên tất cả bài làm có điểm)
     const avgScoreRow = await BaiLam.findOne({
       attributes: [[fn("AVG", col("tong_diem")), "avgScore"]],
       where: {
@@ -70,7 +88,9 @@ export const getRecentExams = async (req, res) => {
         return {
           id: exam.id,
           name: exam.ten_ky_thi,
-          date: exam.createdAt ? new Date(exam.createdAt).toLocaleDateString("vi-VN") : "",
+          date: exam.createdAt
+            ? new Date(exam.createdAt).toLocaleDateString("vi-VN")
+            : "",
           submissions,
           graded,
         };

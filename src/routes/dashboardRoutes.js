@@ -1,8 +1,13 @@
-import { Router } from "express";
-import { getDashboardStats, getRecentExams } from "../controllers/dashboardController.js";
+import express from "express";
+import {
+  getDashboard,
+  getDashboardStats,
+  getRecentExams,
+} from "../controllers/dashboardController.js";
 
-const router = Router();
+const router = express.Router();
 
+router.get("/", getDashboard);
 router.get("/stats", getDashboardStats);
 router.get("/recent-exams", getRecentExams);
 

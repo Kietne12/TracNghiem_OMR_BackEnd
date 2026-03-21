@@ -31,6 +31,11 @@ const Account = sequelize.define(
       type: DataTypes.ENUM("admin", "giangvien", "sinhvien"),
       defaultValue: "sinhvien",
     },
+
+    so_lan_sai: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0,
+    },
   },
   {
     hooks: {

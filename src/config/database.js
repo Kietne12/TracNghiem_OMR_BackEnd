@@ -10,7 +10,7 @@ const sequelize = new Sequelize(
   {
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT) || 3306,
-    dialect: "mariadb",
+    dialect: "mysql",
     logging: false, // Đổi thành console.log để xem SQL query
     pool: {
       max: 10,

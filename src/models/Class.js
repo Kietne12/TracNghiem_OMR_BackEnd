@@ -10,6 +10,7 @@ const LopHoc = sequelize.define("lop_hoc", {
 
   ten_lop: {
     type: DataTypes.STRING(100),
+    allowNull: false,
   },
 
   mo_ta: {
@@ -28,7 +29,11 @@ const LopHoc = sequelize.define("lop_hoc", {
 
   trang_thai: {
     type: DataTypes.BOOLEAN,
+    defaultValue: true,
   },
+}, {
+  tableName: "lop_hoc",
+  timestamps: true,
 });
 
 export default LopHoc;
