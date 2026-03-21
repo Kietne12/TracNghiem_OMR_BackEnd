@@ -2,6 +2,7 @@ import { Op } from "sequelize";
 import fs from "fs";
 import path from "path";
 import PDFDocument from "pdfkit";
+import { detectOMRMarkings } from "../utils/omrDetectorEnhanced.js";
 import {
   sequelize,
   Account,
@@ -230,6 +231,74 @@ const requestAutoScanPayload = async ({ examId, fileRecord }) => {
     maDe: maDe ? String(maDe).trim() : null,
     answersInput,
   };
+};
+
+/**
+ * Scan OMR using local detector (enhanced with anchor points & perspective transform)
+ * Falls back if detection fails
+ */
+const scanOmrLocally = async (imagePath) => {
+  try {
+    console.log(`\n📷 Quét OMR từ ảnh cục bộ: ${imagePath}`);
+    
+    // Resolve absolute path if relative
+    const absolutePath = imagePath.startsWith("/") 
+      ? path.resolve(process.cwd(), imagePath.replace(/^\/+/, ""))
+      : imagePath;
+
+    if (!fs.existsSync(absolutePath)) {
+      console.warn(`   ⚠ Ảnh không tồn tại: ${absolutePath}`);
+      return null;
+    }
+
+    const result = await detectOMRMarkings(absolutePath);
+    
+    if (!result || !result.mssv) {
+      console.log(`   ⚠ Quét cục bộ không được kết quả hợp lệ`);
+      return null;
+    }
+
+    console.log(`\n   ✅ Quét cục bộ thành công:`);
+    console.log(`      SBD: ${result.mssv}`);
+    console.log(`      Mã Đề: ${result.maDe || 'N/A'}`);
+    console.log(`      Answers: ${result.answers.filter(a => a).length}/60 câu`);
+
+    return {
+      mssv: result.mssv,
+      maDe: result.maDe || null,
+      answersInput: result.answers,
+      usedLocalDetector: true,
+      anchorPointsDetected: result.anchorsDetected,
+      perspectiveApplied: result.perspectiveApplied,
+    };
+  } catch (error) {
+    console.warn(`   ⚠ Lỗi quét cục bộ: ${error.message}`);
+    return null;
+  }
+};
+
+/**
+ * Request auto-scan payload: try local detector first, fall back to API
+ */
+const requestAutoScanPayloadWithLocalFallback = async ({ examId, fileRecord }) => {
+  // Try local detector first
+  console.log("\n════════════════════════════════════════");
+  console.log("🔄 Bắt đầu quét OMR...");
+  console.log("════════════════════════════════════════");
+
+  const localResult = await scanOmrLocally(fileRecord.duong_dan);
+  if (localResult) {
+    return localResult;
+  }
+
+  // Fall back to external API if local detection fails
+  console.log("\n⬇️  Quét cục bộ không thành công, thử API bên ngoài...");
+  try {
+    return await requestAutoScanPayload({ examId, fileRecord });
+  } catch (apiError) {
+    console.warn(`   ⚠ API cũng không khả dụng hoặc thất bại: ${apiError.message}`);
+    return null;
+  }
 };
 
 const resolveOmrExamStructure = async (examId, config, requestedMaDe) => {
@@ -1183,6 +1252,21 @@ export const downloadOmrSheet = async (req, res) => {
       doc.fillColor("black");
     };
 
+    // Helper to draw anchor points at 4 corners of a box
+    const drawAnchorPoints = (boxX, boxY, boxWidth, boxHeight) => {
+      const anchorSize = 6; // Size of anchor point squares
+      doc.fillColor("black");
+      
+      // Top-left
+      doc.rect(boxX - anchorSize / 2, boxY - anchorSize / 2, anchorSize, anchorSize).fill();
+      // Top-right
+      doc.rect(boxX + boxWidth - anchorSize / 2, boxY - anchorSize / 2, anchorSize, anchorSize).fill();
+      // Bottom-left
+      doc.rect(boxX - anchorSize / 2, boxY + boxHeight - anchorSize / 2, anchorSize, anchorSize).fill();
+      // Bottom-right
+      doc.rect(boxX + boxWidth - anchorSize / 2, boxY + boxHeight - anchorSize / 2, anchorSize, anchorSize).fill();
+    };
+
     const drawDigitBubbleGrid = ({
       x,
       y,
@@ -1344,7 +1428,10 @@ export const downloadOmrSheet = async (req, res) => {
         .undash();
 
       doc.rect(rightInfoX, infoTop, sbdBoxWidth, infoBoxHeight).stroke();
+      drawAnchorPoints(rightInfoX, infoTop, sbdBoxWidth, infoBoxHeight);
+      
       doc.rect(rightInfoX + sbdBoxWidth + rightInnerGap, infoTop, maDeBoxWidth, infoBoxHeight).stroke();
+      drawAnchorPoints(rightInfoX + sbdBoxWidth + rightInnerGap, infoTop, maDeBoxWidth, infoBoxHeight);
 
       drawDigitBubbleGrid({
         x: rightInfoX,
@@ -1407,10 +1494,14 @@ export const downloadOmrSheet = async (req, res) => {
       const availableForBubbles = columnWidth - numberColumnWidth - numberBubbleGap - 2 * bubblesAreaPadding; // Width for 4 bubbles area
       const bubbleSpacing = (availableForBubbles - 2 * bubbleRadius) / 3; // Center-to-center spacing so D stays inside the box
 
+      // Draw overall answer grid and anchor points
+      const boxHeight = headerHeight + rowsPerColumn * rowHeight + 10; // Box height for all columns
+      drawAnchorPoints(answerLeft, startY, availableWidth, boxHeight);
+
       for (let col = 0; col < columnCount; col += 1) {
         const colX = answerLeft + col * (columnWidth + columnGap); // Column left position
-        const boxHeight = headerHeight + rowsPerColumn * rowHeight + 10; // Box height
-        doc.rect(colX, startY, columnWidth, boxHeight).stroke(); // Draw column border
+        const columnBoxHeight = headerHeight + rowsPerColumn * rowHeight + 10; // Box height
+        doc.rect(colX, startY, columnWidth, columnBoxHeight).stroke(); // Draw column border
 
         // Header row: A, B, C, D labels
         const bubbleHeaderX = colX + bubblesAreaStartX + bubbleRadius; // First bubble center X
@@ -1503,7 +1594,7 @@ export const uploadOmrImage = async (req, res) => {
 
     if (!scanPayload) {
       try {
-        scanPayload = await requestAutoScanPayload({
+        scanPayload = await requestAutoScanPayloadWithLocalFallback({
           examId: exam.id,
           fileRecord,
         });

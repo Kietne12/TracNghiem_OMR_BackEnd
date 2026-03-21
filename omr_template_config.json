@@ -1,0 +1,112 @@
+{
+  "metadata": {
+    "name": "OMR Template - Phiếu Trắc Nghiệm Standard",
+    "version": "1.0",
+    "pageSize": "A4",
+    "dpi": 300,
+    "margins": {
+      "top": 24,
+      "left": 24,
+      "right": 24,
+      "bottom": 24
+    }
+  },
+  "anchorPoints": {
+    "enabled": true,
+    "size": 8,
+    "description": "4 hình vuông đen ở mỗi khung để calibrate"
+  },
+  "regions": {
+    "sbd": {
+      "label": "Số báo danh",
+      "id": "SBD",
+      "description": "5 cột × 10 hàng (chữ số 0-9)",
+      "relativePosition": {
+        "x": "right 10px from left panel",
+        "y": "infoTop 74px"
+      },
+      "anchorPointsLocal": {
+        "topLeft": "auto",
+        "topRight": "auto",
+        "bottomLeft": "auto",
+        "bottomRight": "auto"
+      },
+      "columns": 5,
+      "rows": 10,
+      "bubbleRadius": 5,
+      "centerSpacing": 20.5,
+      "expectedROI": {
+        "relativeX": 0.55,
+        "relativeY": 0.04,
+        "relativeWidth": 0.22,
+        "relativeHeight": 0.15
+      }
+    },
+    "maDe": {
+      "label": "Mã đề thi",
+      "id": "MADE",
+      "description": "3 cột × 10 hàng (chữ số 0-9)",
+      "relativePosition": {
+        "x": "right of SBD",
+        "y": "infoTop 74px"
+      },
+      "anchorPointsLocal": {
+        "topLeft": "auto",
+        "topRight": "auto",
+        "bottomLeft": "auto",
+        "bottomRight": "auto"
+      },
+      "columns": 3,
+      "rows": 10,
+      "bubbleRadius": 5,
+      "centerSpacing": 20.5,
+      "expectedROI": {
+        "relativeX": 0.77,
+        "relativeY": 0.04,
+        "relativeWidth": 0.12,
+        "relativeHeight": 0.15
+      }
+    },
+    "answers": {
+      "label": "Đáp án",
+      "id": "ANSWERS",
+      "description": "60 câu (20 câu/cột × 3 cột, 4 lựa chọn A-D)",
+      "relativePosition": {
+        "x": "left margin",
+        "y": "below info section"
+      },
+      "anchorPointsLocal": {
+        "topLeft": "auto",
+        "topRight": "auto",
+        "bottomLeft": "auto",
+        "bottomRight": "auto"
+      },
+      "columns": 3,
+      "questionsPerColumn": 20,
+      "maxQuestions": 60,
+      "options": ["A", "B", "C", "D"],
+      "bubbleRadius": 5,
+      "expectedROI": {
+        "relativeX": 0.04,
+        "relativeY": 0.32,
+        "relativeWidth": 0.92,
+        "relativeHeight": 0.63
+      }
+    }
+  },
+  "processing": {
+    "perspectiveTransform": {
+      "enabled": true,
+      "description": "Nắn ảnh khi giấy bị lệch/xoay"
+    },
+    "adaptiveThreshold": {
+      "enabled": true,
+      "blockSize": 19,
+      "constant": 2
+    },
+    "darknesThreshold": {
+      "bubbleDetection": 0.15,
+      "description": "Tỷ lệ pixel tối trong bubble được coi là tô"
+    }
+  }
+}
