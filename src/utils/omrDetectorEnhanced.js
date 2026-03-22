@@ -7,6 +7,20 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const toBoxFromCircle = (centerX, centerY, radius) => ({
+  left: Math.round(centerX - radius),
+  top: Math.round(centerY - radius),
+  width: Math.round(radius * 2),
+  height: Math.round(radius * 2),
+});
+
+const logRegionBox = (group, label, box, extra = "") => {
+  const suffix = extra ? ` | ${extra}` : "";
+  console.log(
+    `   [${group}] ${label}: x=${box.left}, y=${box.top}, w=${box.width}, h=${box.height}${suffix}`
+  );
+};
+
 /**
  * Enhanced OMR Detector with Anchor Point Detection & Perspective Correction
  * 
@@ -336,26 +350,32 @@ const extractRegionROIs = async (imageBuffer, metadata, layoutParams) => {
 
     // Extract SBD region
     console.log(`   → Trích xuất vùng SBD...`);
+    const sbdExtractBox = {
+      left: Math.round(rightInfoX),
+      top: Math.round(infoTop),
+      width: Math.round(sbdBoxWidth),
+      height: infoBoxHeight,
+    };
+    logRegionBox('ROI', 'SBD', sbdExtractBox);
+
     const sbdRegion = await sharp(imageBuffer)
-      .extract({
-        left: Math.round(rightInfoX),
-        top: Math.round(infoTop),
-        width: Math.round(sbdBoxWidth),
-        height: infoBoxHeight,
-      })
+      .extract(sbdExtractBox)
       .greyscale()
       .raw()
       .toBuffer({ resolveWithObject: true });
 
     // Extract Mã Đề region
     console.log(`   → Trích xuất vùng Mã Đề...`);
+    const madeExtractBox = {
+      left: Math.round(rightInfoX + sbdBoxWidth + rightInnerGap),
+      top: Math.round(infoTop),
+      width: Math.round(madeBoxWidth),
+      height: infoBoxHeight,
+    };
+    logRegionBox('ROI', 'Mã Đề', madeExtractBox);
+
     const makeRegion = await sharp(imageBuffer)
-      .extract({
-        left: Math.round(rightInfoX + sbdBoxWidth + rightInnerGap),
-        top: Math.round(infoTop),
-        width: Math.round(madeBoxWidth),
-        height: infoBoxHeight,
-      })
+      .extract(madeExtractBox)
       .greyscale()
       .raw()
       .toBuffer({ resolveWithObject: true });
@@ -367,13 +387,16 @@ const extractRegionROIs = async (imageBuffer, metadata, layoutParams) => {
     const answersGridWidth = Math.round(pageWidth - 2 * marginLeft);
     const answersGridHeight = Math.round(pageHeight - answersGridY - marginTop);
 
+    const answersExtractBox = {
+      left: answersGridX,
+      top: answersGridY,
+      width: answersGridWidth,
+      height: answersGridHeight,
+    };
+    logRegionBox('ROI', 'Đáp án', answersExtractBox);
+
     const answersRegion = await sharp(imageBuffer)
-      .extract({
-        left: answersGridX,
-        top: answersGridY,
-        width: answersGridWidth,
-        height: answersGridHeight,
-      })
+      .extract(answersExtractBox)
       .greyscale()
       .raw()
       .toBuffer({ resolveWithObject: true });
@@ -422,6 +445,14 @@ const detectStudentNumberEnhanced = async (roiData) => {
 
       for (let digit = 0; digit < 10; digit++) {
         const digitRowY = Math.round(gridStartY + ((digit + 0.5) / 10) * gridHeight);
+        const bubbleBox = toBoxFromCircle(colCenterX, digitRowY, bubbleOuterR);
+        logRegionBox(
+          'SBD',
+          `C${col}-D${digit}`,
+          bubbleBox,
+          `center=(${colCenterX},${digitRowY}), r=${bubbleOuterR}`
+        );
+
         let innerDark = 0;
         let innerTotal = 0;
         let ringDark = 0;
@@ -513,6 +544,14 @@ const detectExamCodeEnhanced = async (roiData) => {
 
       for (let digit = 0; digit < 10; digit++) {
         const digitRowY = Math.round(gridStartY + ((digit + 0.5) / 10) * gridHeight);
+        const bubbleBox = toBoxFromCircle(colCenterX, digitRowY, bubbleOuterR);
+        logRegionBox(
+          'Mã Đề',
+          `C${col}-D${digit}`,
+          bubbleBox,
+          `center=(${colCenterX},${digitRowY}), r=${bubbleOuterR}`
+        );
+
         let innerDark = 0;
         let innerTotal = 0;
         let ringDark = 0;
@@ -608,6 +647,13 @@ const detectAnswersEnhanced = async (roiData) => {
       for (let choiceIdx = 0; choiceIdx < choicesCount; choiceIdx++) {
         const bubbleCenterX = Math.round(colStart + (choiceIdx + 0.5) * choiceWidth);
         const bubbleCenterY = Math.round(rowStart + rowHeight / 2);
+        const bubbleBox = toBoxFromCircle(bubbleCenterX, bubbleCenterY, bubbleRadius);
+        logRegionBox(
+          'ANS',
+          `Q${qIndex + 1}-${choices[choiceIdx]}`,
+          bubbleBox,
+          `center=(${bubbleCenterX},${bubbleCenterY}), r=${bubbleRadius}, col=${colIndex}, row=${rowIndex}`
+        );
 
         // Check if bubble is filled
         let darkPixels = 0;

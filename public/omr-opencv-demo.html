@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OMR OpenCV.js Demo</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --ink: #1b1b1b;
+      --accent: #0d9488;
+      --accent-2: #b45309;
+      --panel: #ffffff;
+      --line: #d6d3d1;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 10%, #fef3c7 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, #ccfbf1 0%, transparent 42%),
+        var(--bg);
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .layout {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 10px 24px rgba(28, 25, 23, 0.08);
+    }
+
+    .controls {
+      padding: 18px;
+    }
+
+    .controls h1 {
+      margin: 0 0 6px;
+      font-size: 22px;
+    }
+
+    .controls p {
+      margin: 0 0 16px;
+      color: #57534e;
+      font-size: 13px;
+    }
+
+    .group {
+      margin-bottom: 14px;
+    }
+
+    label {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      display: block;
+    }
+
+    input[type="file"],
+    input[type="number"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      width: 100%;
+      cursor: pointer;
+      font-weight: 700;
+      color: #fff;
+      background: linear-gradient(135deg, var(--accent), #0f766e);
+      transition: transform 0.15s ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+    }
+
+    button.secondary {
+      margin-top: 8px;
+      background: linear-gradient(135deg, var(--accent-2), #92400e);
+    }
+
+    .status {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #44403c;
+      min-height: 40px;
+      white-space: pre-line;
+    }
+
+    .legend {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: #fafaf9;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .chip {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      border: 1px solid #777;
+      display: inline-block;
+    }
+
+    .viewer {
+      padding: 14px;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 12px;
+    }
+
+    .canvas-wrap {
+      border: 1px dashed #a8a29e;
+      border-radius: 12px;
+      min-height: 300px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: auto;
+      background: #fafaf9;
+    }
+
+    .canvas-wrap canvas,
+    .canvas-wrap img {
+      max-width: 100%;
+      height: auto;
+    }
+
+    .json-output {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fafaf9;
+      padding: 10px;
+      font-size: 12px;
+      max-height: 260px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="card controls">
+      <h1>OMR OpenCV.js</h1>
+      <p>Contour-based, không dùng chia lưới cố định, hỗ trợ 120 câu (4 cột x 30).</p>
+
+      <div class="group">
+        <label for="imageInput">Ảnh phiếu trả lời</label>
+        <input id="imageInput" type="file" accept="image/*" />
+      </div>
+
+      <div class="group">
+        <label for="blankThreshold">Blank Threshold</label>
+        <input id="blankThreshold" type="number" min="0" max="1" step="0.01" value="0.18" />
+      </div>
+
+      <div class="group">
+        <label style="display:flex; align-items:center; gap:8px; font-weight:600;">
+          <input id="useAnchorFlow" type="checkbox" checked />
+          Flow neo tự động (neo ngoài -> neo vùng -> quét)
+        </label>
+      </div>
+
+      <div class="group">
+        <label style="display:flex; align-items:center; gap:8px; font-weight:600;">
+          <input id="useWarp" type="checkbox" />
+          Fallback căn chỉnh giấy toàn trang (khi tắt flow neo)
+        </label>
+      </div>
+
+      <button id="btnProcess" type="button">Xử Lý OMR</button>
+      <button id="btnCsv" type="button" class="secondary">Tải CSV Kết Quả</button>
+
+      <div class="status" id="status">Đang chờ ảnh...</div>
+
+      <div class="legend">
+        <div style="font-weight:700; margin-bottom:6px;">Chú giải màu overlay</div>
+        <div class="legend-item"><span class="chip" style="background:#ff0000"></span> Đỏ: điểm neo (ngoài + neo vùng)</div>
+        <div class="legend-item"><span class="chip" style="background:#ffa500"></span> Cam: bubble hợp lệ nhưng không được chọn</div>
+        <div class="legend-item"><span class="chip" style="background:#00cc33"></span> Xanh lá: bubble được chọn</div>
+        <div class="legend-item"><span class="chip" style="background:#ff66cc"></span> Hồng: câu Invalid (nhiều lựa chọn cùng đậm)</div>
+        <div class="legend-item"><span class="chip" style="background:#9933ff"></span> Tím: nhãn, số câu, nhãn neo</div>
+        <div class="legend-item"><span class="chip" style="background:#ffe033"></span> Vàng: câu Blank</div>
+      </div>
+    </aside>
+
+    <main class="card viewer">
+      <strong>Ảnh Debug Overlay</strong>
+      <div class="canvas-wrap" id="previewWrap">Chưa có kết quả</div>
+      <pre class="json-output" id="jsonOutput">{}</pre>
+    </main>
+  </div>
+
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+  <script type="module">
+    import OMRProcessor from "./omr-opencv-processor.js";
+
+    const imageInput = document.getElementById("imageInput");
+    const statusEl = document.getElementById("status");
+    const previewWrap = document.getElementById("previewWrap");
+    const jsonOutput = document.getElementById("jsonOutput");
+    const blankThresholdInput = document.getElementById("blankThreshold");
+    const useWarpInput = document.getElementById("useWarp");
+    const useAnchorFlowInput = document.getElementById("useAnchorFlow");
+    const btnProcess = document.getElementById("btnProcess");
+    const btnCsv = document.getElementById("btnCsv");
+
+    let latestAnswers = null;
+
+    const setStatus = (message) => {
+      statusEl.textContent = message;
+    };
+
+    const renderOverlay = (canvas) => {
+      previewWrap.innerHTML = "";
+      previewWrap.appendChild(canvas);
+    };
+
+    const downloadCsv = (csvText, fileName = "omr_results.csv") => {
+      const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = fileName;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    };
+
+    btnProcess.addEventListener("click", async () => {
+      if (!imageInput.files || !imageInput.files[0]) {
+        setStatus("Vui lòng chọn ảnh trước.");
+        return;
+      }
+
+      btnProcess.disabled = true;
+      setStatus("Đang chờ OpenCV.js sẵn sàng...");
+
+      try {
+        await OMRProcessor.waitForOpenCv();
+
+        const processor = new OMRProcessor({
+          blankDensityThreshold: Number(blankThresholdInput.value || 0.18),
+          useAnchorGuidedFlow: useAnchorFlowInput.checked,
+          usePerspectiveTransform: useWarpInput.checked,
+          debug: true,
+        });
+
+        setStatus("Đang xử lý: neo ngoài -> neo vùng (SBD/Mã đề/Câu hỏi) -> quét theo vùng...");
+        const result = await processor.process(imageInput.files[0]);
+
+        latestAnswers = result.answers;
+        jsonOutput.textContent = JSON.stringify(
+          {
+            mssv: result.mssv || null,
+            maDe: result.maDe || null,
+            answers: result.answers,
+          },
+          null,
+          2
+        );
+        renderOverlay(result.debug.overlayCanvas);
+
+        setStatus(
+          `Hoàn tất.\n` +
+          `MSSV: ${result.mssv || "(chưa nhận dạng)"}\n` +
+          `Mã đề: ${result.maDe || "(chưa nhận dạng)"}\n` +
+          `Tổng câu: ${result.metadata.totalQuestions}\n` +
+          `Blank: ${result.metadata.blankCount}\n` +
+          `Invalid: ${result.metadata.invalidCount}\n` +
+          `Bubbles phát hiện: ${result.metadata.detectedBubbleCount ?? "n/a"}`
+        );
+      } catch (error) {
+        console.error(error);
+        setStatus(`Lỗi: ${error.message}`);
+      } finally {
+        btnProcess.disabled = false;
+      }
+    });
+
+    btnCsv.addEventListener("click", () => {
+      if (!latestAnswers) {
+        setStatus("Chưa có dữ liệu để export CSV.");
+        return;
+      }
+      const csv = OMRProcessor.toCsv(latestAnswers);
+      downloadCsv(csv);
+      setStatus("Đã tải CSV kết quả.");
+    });
+  </script>
+</body>
+</html>

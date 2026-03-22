@@ -1,4 +1,4 @@
-import { User, Account, sequelize } from "../models/index.js";
+import { User, Account, CaiDatHeThong, sequelize } from "../models/index.js";
 import { Op } from "sequelize";
 
 const parseNumericMssv = (value) => {
@@ -37,13 +37,33 @@ const getNextStudentMssv = async () => {
 
 // GET ALL
 export const getAccounts = async (req, res) => {
+    const settings = await CaiDatHeThong.findOne({
+        attributes: ["so_lan_dang_nhap"],
+        raw: true,
+    });
+    const maxFailedAttempts = Number(settings?.so_lan_dang_nhap ?? 5);
+
     const data = await User.findAll({
         include: {
             model: Account,
             as: "tai_khoan",
-            attributes: ["username", "role"],
+            attributes: ["username", "role", "so_lan_sai"],
         },
     });
+
+    const usersNeedSyncLock = data.filter((user) => {
+        const failedAttempts = Number(user?.tai_khoan?.so_lan_sai ?? 0);
+        return user.trang_thai && failedAttempts >= maxFailedAttempts;
+    });
+
+    if (usersNeedSyncLock.length > 0) {
+        await Promise.all(
+            usersNeedSyncLock.map(async (user) => {
+                user.trang_thai = false;
+                await user.save();
+            })
+        );
+    }
 
     res.json(data);
 };
@@ -53,6 +73,9 @@ export const getAccounts = async (req, res) => {
 export const createAccount = async (req, res) => {
     try {
         const { ho_ten, email, username, password, role } = req.body;
+        const normalizedRole = typeof role === "string" && role.trim() !== ""
+            ? role.trim().toLowerCase()
+            : "sinhvien";
 
         const existingEmail = await User.findOne({
             where: { email },
@@ -77,7 +100,7 @@ export const createAccount = async (req, res) => {
         const tx = await sequelize.transaction();
         try {
             let generatedMssv = null;
-            if (role === "sinhvien") {
+            if (normalizedRole === "sinhvien") {
                 generatedMssv = await getNextStudentMssv();
             }
 
@@ -93,7 +116,7 @@ export const createAccount = async (req, res) => {
                 username: username,
                 // Account model has beforeCreate hook to hash password.
                 password,
-                role,
+                role: normalizedRole,
             }, { transaction: tx });
 
             await tx.commit();
@@ -177,9 +200,23 @@ export const toggleLock = async (req, res) => {
     const { id } = req.params;
 
     const user = await User.findByPk(id);
+    if (!user) {
+        return res.status(404).json({ message: "Không tìm thấy user" });
+    }
+
+    const account = await Account.findOne({ where: { user_id: id } });
+    if (!account) {
+        return res.status(404).json({ message: "Không tìm thấy tài khoản" });
+    }
 
     user.trang_thai = !user.trang_thai;
     await user.save();
+
+    // Khi admin mở khóa, reset số lần đăng nhập sai để user đăng nhập lại bình thường.
+    if (user.trang_thai) {
+        account.so_lan_sai = 0;
+        await account.save();
+    }
 
     res.json({ message: "Đã cập nhật trạng thái" });
 };

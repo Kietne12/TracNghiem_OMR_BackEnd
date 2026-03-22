@@ -12,6 +12,4 @@ router.get("/backup", controller.getBackupHistory)
 router.post("/restore", controller.uploadMiddleware, controller.restore)
 router.get("/backup/download/:filename", controller.downloadBackup)
 
-router.delete("/cache", controller.clearCache)
-
 export default router

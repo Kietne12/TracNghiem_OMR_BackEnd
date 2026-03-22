@@ -1,6 +1,18 @@
 import jwt from "jsonwebtoken";
 import { Account, CaiDatHeThong, User } from "../models/index.js";
 
+const LOCKED_MESSAGE = "Tài khoản đã bị khóa do đăng nhập sai quá nhiều";
+const DEFAULT_SESSION_MINUTES = 30;
+
+const normalizeSessionMinutes = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_SESSION_MINUTES;
+  }
+
+  return parsed;
+};
+
 /**
 
 * POST /api/auth/login
@@ -23,14 +35,10 @@ export const login = async (req, res) => {
         {
           model: User,
           as: "nguoi_dung",
-          attributes: ["ho_ten", "email", "mssv"],
+          attributes: ["ho_ten", "email", "mssv", "trang_thai"],
         },
       ],
     });
-    console.log("username nhập:", username)
-    console.log("password nhập:", password)
-    console.log("account tìm được:", account?.username)
-    console.log("password DB:", account?.password)
 
     if (!account) {
       return res.status(401).json({
@@ -38,23 +46,46 @@ export const login = async (req, res) => {
       });
     }
 
+    // Khóa bởi admin: không cho đăng nhập.
+    if (!account.nguoi_dung?.trang_thai) {
+      return res.status(403).json({
+        message: LOCKED_MESSAGE,
+      });
+    }
+
     // 🔥 LẤY CONFIG
     const settings = await CaiDatHeThong.findOne()
+    const maxFailedAttempts = Number(settings?.so_lan_dang_nhap ?? 5)
+    const sessionMinutes = normalizeSessionMinutes(settings?.thoi_gian_phien)
 
     // 🔥 CHECK KHÓA
-    if (account.so_lan_sai >= settings.so_lan_dang_nhap) {
+    if (account.so_lan_sai >= maxFailedAttempts) {
+      // Đồng bộ trạng thái khóa để admin nhìn thấy tài khoản đang bị khóa.
+      if (account.nguoi_dung?.trang_thai) {
+        account.nguoi_dung.trang_thai = false;
+        await account.nguoi_dung.save();
+      }
+
       return res.status(403).json({
-        message: "Tài khoản đã bị khóa"
+        message: LOCKED_MESSAGE,
       })
     }
     // So sánh mật khẩu
     const isMatch = await account.comparePassword(password);
-    console.log("match:", isMatch)
 
     if (!isMatch) {
 
       account.so_lan_sai += 1
       await account.save()
+
+      if (account.so_lan_sai >= maxFailedAttempts && account.nguoi_dung?.trang_thai) {
+        account.nguoi_dung.trang_thai = false;
+        await account.nguoi_dung.save();
+
+        return res.status(403).json({
+          message: LOCKED_MESSAGE,
+        });
+      }
 
       return res.status(401).json({
         message: "Username hoặc mật khẩu không đúng",
@@ -72,12 +103,14 @@ export const login = async (req, res) => {
         role: account.role,
       },
       process.env.JWT_SECRET,
-      { expiresIn: "8h" }
+      { expiresIn: `${sessionMinutes}m` }
     );
 
     return res.status(200).json({
       message: "Đăng nhập thành công",
       token,
+      session_timeout_minutes: sessionMinutes,
+      session_timeout_ms: sessionMinutes * 60 * 1000,
       account: {
         id: account.id,
         user_id: account.user_id,
@@ -102,6 +135,12 @@ export const login = async (req, res) => {
   */
 export const getMe = async (req, res) => {
   try {
+    const settings = await CaiDatHeThong.findOne({
+      attributes: ["thoi_gian_phien"],
+      raw: true,
+    });
+    const sessionMinutes = normalizeSessionMinutes(settings?.thoi_gian_phien);
+
     const account = await Account.findByPk(req.user.id, {
       attributes: { exclude: ["password"] },
       include: [
@@ -120,6 +159,8 @@ export const getMe = async (req, res) => {
     }
 
     return res.status(200).json({
+      session_timeout_minutes: sessionMinutes,
+      session_timeout_ms: sessionMinutes * 60 * 1000,
       account: {
         id: account.id,
         user_id: account.user_id,
