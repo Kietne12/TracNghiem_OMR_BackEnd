@@ -2,3 +2,6 @@ node_modules/
 .env
 dist/
 build/
+uploads/
+backups/
+.tmp_sharp_blockers/
