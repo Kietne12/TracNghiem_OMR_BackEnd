@@ -15,6 +15,15 @@ const MonHoc = sequelize.define("mon_hoc", {
     type: DataTypes.TEXT,
     allowNull: true,
   },
+  giang_vien_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    unique: true,
+  },
+  lop_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+  },
 });
 
 export default MonHoc;

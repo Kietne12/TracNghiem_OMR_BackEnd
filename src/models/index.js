@@ -30,6 +30,10 @@ Account.belongsTo(User, { foreignKey: "user_id", as: "nguoi_dung" });
 
 CauHoi.belongsTo(MonHoc, { foreignKey: "mon_hoc_id" });
 KyThi.belongsTo(MonHoc, { foreignKey: "mon_hoc_id" });
+MonHoc.belongsTo(User, { foreignKey: "giang_vien_id", as: "giang_vien" });
+User.hasOne(MonHoc, { foreignKey: "giang_vien_id", as: "mon_giang_day" });
+MonHoc.belongsTo(LopHoc, { foreignKey: "lop_id", as: "lop_hoc" });
+LopHoc.hasMany(MonHoc, { foreignKey: "lop_id", as: "mon_hocs" });
 
 BaiLam.belongsTo(KyThi, { foreignKey: "ky_thi_id", as: "ky_thi" });
 KyThi.hasMany(BaiLam, { foreignKey: "ky_thi_id", as: "bai_lams" });
@@ -49,7 +53,6 @@ LopSinhVien.belongsTo(LopHoc, { foreignKey: "lop_id" });
 LopSinhVien.belongsTo(User, { foreignKey: "sinh_vien_id" });
 LopHoc.hasMany(LopSinhVien, { foreignKey: "lop_id" });
 User.hasMany(LopSinhVien, { foreignKey: "sinh_vien_id" });
-
 FileOMR.belongsTo(KyThi, { foreignKey: "ky_thi_id" });
 KyThi.hasMany(FileOMR, { foreignKey: "ky_thi_id" });
 KetQuaOMR.belongsTo(FileOMR, { foreignKey: "file_omr_id" });

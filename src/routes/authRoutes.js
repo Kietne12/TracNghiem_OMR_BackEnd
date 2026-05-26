@@ -1,13 +1,20 @@
 import { Router } from "express";
-import { login, getMe } from "../controllers/authController.js";
+import {
+  changePassword,
+  confirmPasswordResetCode,
+  getMe,
+  login,
+  requestPasswordResetCode,
+} from "../controllers/authController.js";
 import { verifyToken } from "../middlewares/authMiddleware.js";
 
 const router = Router();
 
-// Đăng nhập
 router.post("/login", login);
+router.post("/forgot-password/request-code", requestPasswordResetCode);
+router.post("/forgot-password/confirm-code", confirmPasswordResetCode);
 
-// Lấy thông tin user hiện tại (cần đăng nhập)
 router.get("/me", verifyToken, getMe);
+router.put("/change-password", verifyToken, changePassword);
 
 export default router;

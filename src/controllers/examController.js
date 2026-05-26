@@ -68,6 +68,26 @@ const getTeacherUserId = async (accountId) => {
   return account.user_id;
 };
 
+const getAssignedSubjectForTeacher = async (teacherUserId) => {
+  if (!teacherUserId) return null;
+  return MonHoc.findOne({
+    where: { giang_vien_id: teacherUserId },
+    attributes: ["id", "lop_id", "ten_mon_hoc"],
+    raw: true,
+  });
+};
+
+const ensureTeacherExamAccess = async (req, exam) => {
+  if (req.user?.role !== "giangvien") return true;
+
+  const teacherUserId = await getTeacherUserId(req.user.id);
+  const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+  return Boolean(
+    assignedSubject &&
+    Number(exam.mon_hoc_id) === Number(assignedSubject.id)
+  );
+};
+
 const resolveStudentUserId = async (req, explicitUserId = null) => {
   if (explicitUserId) {
     const parsed = Number(explicitUserId);
@@ -124,6 +144,29 @@ const safeFileName = (value, fallback = "download") => {
     .replace(/^_|_$/g, "")
     .toLowerCase();
   return normalized || fallback;
+};
+
+const getNormalizedMaDeData = (config = null) => {
+  const rawList = Array.isArray(config?.ma_de_data) ? config.ma_de_data : [];
+  const normalized = rawList
+    .map((item, index) => {
+      const maDe = String(item?.ma_de || "").trim() || String(index + 1).padStart(3, "0");
+      return {
+        ...item,
+        ma_de: maDe,
+      };
+    })
+    .filter((item) => item.ma_de);
+
+  if (normalized.length > 0) return normalized;
+
+  return [
+    {
+      ma_de: "001",
+      question_order: Array.isArray(config?.ds_cau_hoi_chon) ? config.ds_cau_hoi_chon : [],
+      answer_order: {},
+    },
+  ];
 };
 
 const attachPdfResponse = (res, chunks, fileName) => {
@@ -823,6 +866,14 @@ export const getClasses = async (req, res) => {
       }
 
       whereClause.id = { [Op.in]: assignedClassIds };
+    } else if (req.user?.role === "giangvien") {
+      const teacherUserId = await getTeacherUserId(req.user.id);
+      const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+      if (!assignedSubject?.lop_id) {
+        return res.status(200).json({ classes: [] });
+      }
+
+      whereClause.id = assignedSubject.lop_id;
     }
 
     const classes = await LopHoc.findAll({
@@ -856,10 +907,49 @@ export const getClasses = async (req, res) => {
   }
 };
 
+export const getSubjectsForLearning = async (req, res) => {
+  try {
+    const whereClause = {};
+
+    if (req.user?.role === "sinhvien") {
+      const assignedClassIds = await getAssignedClassIdsForStudent(req);
+      if (assignedClassIds.length === 0) {
+        return res.status(200).json({ subjects: [] });
+      }
+      whereClause.lop_id = { [Op.in]: assignedClassIds };
+    }
+
+    const subjects = await MonHoc.findAll({
+      where: whereClause,
+      attributes: ["id", "ten_mon_hoc", "mo_ta", "lop_id"],
+      include: [
+        {
+          model: LopHoc,
+          as: "lop_hoc",
+          attributes: ["id", "ten_lop", "hoc_ky", "nam_hoc"],
+          required: false,
+        },
+        {
+          model: User,
+          as: "giang_vien",
+          attributes: ["id", "ho_ten"],
+          required: false,
+        },
+      ],
+      order: [["ten_mon_hoc", "ASC"]],
+    });
+
+    res.status(200).json({ subjects });
+  } catch (error) {
+    console.error("getSubjectsForLearning error:", error);
+    res.status(500).json({ message: "Lỗi khi lấy danh sách môn học" });
+  }
+};
+
 // ===== GET ALL EXAMS =====
 export const getExams = async (req, res) => {
   try {
-    const { lop_id } = req.query;
+    const { lop_id, mon_hoc_id } = req.query;
     const whereClause = {};
     let assignedClassIds = null;
 
@@ -868,9 +958,20 @@ export const getExams = async (req, res) => {
       if (assignedClassIds.length === 0) {
         return res.json({ exams: [] });
       }
+    } else if (req.user?.role === "giangvien") {
+      const teacherUserId = await getTeacherUserId(req.user.id);
+      const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+      if (!assignedSubject) {
+        return res.json({ exams: [] });
+      }
+
+      whereClause.mon_hoc_id = assignedSubject.id;
+      if (assignedSubject.lop_id) {
+        whereClause.lop_id = assignedSubject.lop_id;
+      }
     }
 
-    if (lop_id) {
+    if (lop_id && req.user?.role !== "giangvien") {
       const parsedClassId = Number(lop_id);
       if (!Number.isInteger(parsedClassId) || parsedClassId <= 0) {
         return res.status(400).json({ message: "lop_id không hợp lệ" });
@@ -883,6 +984,14 @@ export const getExams = async (req, res) => {
       whereClause.lop_id = parsedClassId;
     } else if (Array.isArray(assignedClassIds)) {
       whereClause.lop_id = { [Op.in]: assignedClassIds };
+    }
+
+    if (mon_hoc_id && req.user?.role !== "giangvien") {
+      const parsedSubjectId = Number(mon_hoc_id);
+      if (!Number.isInteger(parsedSubjectId) || parsedSubjectId <= 0) {
+        return res.status(400).json({ message: "mon_hoc_id không hợp lệ" });
+      }
+      whereClause.mon_hoc_id = parsedSubjectId;
     }
 
     const exams = await KyThi.findAll({
@@ -903,7 +1012,13 @@ export const getExams = async (req, res) => {
 
         return {
           ...exam.toJSON(),
-          cau_hinh: config || null,
+          cau_hinh: config
+            ? {
+                ...config,
+                ma_de_data:
+                  config.hinh_thuc_thi === "omr" ? getNormalizedMaDeData(config) : config.ma_de_data,
+              }
+            : null,
           tong_so_cau: config?.tong_so_cau || totalQuestions,
         };
       })
@@ -1144,6 +1259,14 @@ export const getExamById = async (req, res) => {
       raw: true,
     });
 
+    const normalizedConfig = config
+      ? {
+          ...config,
+          ma_de_data:
+            config.hinh_thuc_thi === "omr" ? getNormalizedMaDeData(config) : config.ma_de_data,
+        }
+      : null;
+
     const examQuestions = await CauHoiKyThi.findAll({
       where: { ky_thi_id: exam.id },
       attributes: ["id", "cau_hoi_id"],
@@ -1167,7 +1290,7 @@ export const getExamById = async (req, res) => {
 
     res.json({
       exam,
-      cau_hinh: config,
+      cau_hinh: normalizedConfig,
       questions: examQuestions,
     });
   } catch (error) {
@@ -1222,6 +1345,17 @@ export const submitExam = async (req, res) => {
         ["A", "B", "C", "D"].includes(normalized) ? normalized : null
       );
     });
+
+    const missingQuestion = examQuestions.find((item) => {
+      const questionId = Number(item.cau_hoi_id);
+      return !answersMap.has(questionId) || !answersMap.get(questionId);
+    });
+
+    if (missingQuestion) {
+      return res.status(400).json({
+        message: "Bạn cần chọn đủ đáp án trước khi nộp bài",
+      });
+    }
 
     let correctCount = 0;
     const details = examQuestions.map((item) => {
@@ -1313,12 +1447,18 @@ export const createExam = async (req, res) => {
       return res.status(401).json({ message: "Tài khoản giảng viên không hợp lệ" });
     }
 
+    const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+    const effectiveMonHocId = assignedSubject?.id || mon_hoc_id || 1;
+    if (assignedSubject?.lop_id && Number(lop_id) !== Number(assignedSubject.lop_id)) {
+      return res.status(403).json({ message: "Giảng viên chỉ được tạo kỳ thi cho lớp/môn đã phân công" });
+    }
+
     const config = normalizeExamConfigInput(req.body);
     config.hoc_ky = hoc_ky ?? config.hoc_ky;
     config.nam_hoc = nam_hoc ?? config.nam_hoc;
 
     const questionIds = await resolveQuestionIds({
-      monHocId: mon_hoc_id || 1,
+      monHocId: effectiveMonHocId,
       teacherUserId,
       config,
     });
@@ -1341,7 +1481,7 @@ export const createExam = async (req, res) => {
 
     const examPayload = {
       ten_ky_thi,
-      mon_hoc_id: mon_hoc_id || 1,
+      mon_hoc_id: effectiveMonHocId,
       lop_id,
       thoi_gian_lam_bai,
       thoi_gian_bat_dau: startAt,
@@ -1394,9 +1534,15 @@ export const updateExamConfig = async (req, res) => {
       where: { ky_thi_id: exam.id },
     });
 
+    const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+    const effectiveMonHocId = assignedSubject?.id || req.body.mon_hoc_id || exam.mon_hoc_id || 1;
+    if (assignedSubject?.lop_id && Number(lopId) !== Number(assignedSubject.lop_id)) {
+      return res.status(403).json({ message: "Giảng viên chỉ được cập nhật kỳ thi thuộc lớp/môn đã phân công" });
+    }
+
     const config = normalizeExamConfigInput(req.body, existingConfig);
     const questionIds = await resolveQuestionIds({
-      monHocId: req.body.mon_hoc_id || exam.mon_hoc_id || 1,
+      monHocId: effectiveMonHocId,
       teacherUserId,
       config,
     });
@@ -1421,7 +1567,7 @@ export const updateExamConfig = async (req, res) => {
 
     const examPayload = {
       ten_ky_thi: req.body.ten_ky_thi || exam.ten_ky_thi,
-      mon_hoc_id: req.body.mon_hoc_id || exam.mon_hoc_id || 1,
+      mon_hoc_id: effectiveMonHocId,
       lop_id: lopId,
       thoi_gian_lam_bai: req.body.thoi_gian_lam_bai || exam.thoi_gian_lam_bai,
       thoi_gian_bat_dau: startAt,
@@ -1458,6 +1604,9 @@ export const getOmrTemplate = async (req, res) => {
     const exam = await KyThi.findByPk(id);
     if (!exam) {
       return res.status(404).json({ message: "Không tìm thấy kỳ thi" });
+    }
+    if (!(await ensureTeacherExamAccess(req, exam))) {
+      return res.status(403).json({ message: "Không có quyền xem dữ liệu chấm bài của kỳ thi này" });
     }
 
     const config = await CauHinhKyThi.findOne({
@@ -1583,6 +1732,9 @@ export const getExamGradingResultDetail = async (req, res) => {
     const exam = await KyThi.findByPk(id, { raw: true });
     if (!exam) {
       return res.status(404).json({ message: "Không tìm thấy kỳ thi" });
+    }
+    if (!(await ensureTeacherExamAccess(req, exam))) {
+      return res.status(403).json({ message: "Không có quyền xem chi tiết bài làm của kỳ thi này" });
     }
 
     const attempt = await BaiLam.findOne({
@@ -1782,9 +1934,15 @@ export const downloadOmrSheet = async (req, res) => {
     }
 
     const totalQuestions = config.tong_so_cau || (await CauHoiKyThi.count({ where: { ky_thi_id: exam.id } }));
-    const maDeCodes = Array.isArray(config.ma_de_data)
-      ? config.ma_de_data.map((item) => item?.ma_de).filter(Boolean)
-      : [];
+    const normalizedMaDeData = getNormalizedMaDeData(config);
+    const maDeCodes = normalizedMaDeData.map((item) => item.ma_de).filter(Boolean);
+
+    if (!Array.isArray(config.ma_de_data) || config.ma_de_data.length === 0) {
+      await CauHinhKyThi.update(
+        { ma_de_data: normalizedMaDeData },
+        { where: { ky_thi_id: id } }
+      );
+    }
 
     const doc = new PDFDocument({ bufferPages: true, size: "A4", margin: 24 });
     const chunks = [];
@@ -1796,7 +1954,7 @@ export const downloadOmrSheet = async (req, res) => {
     });
 
     const drawAlignmentMarkers = () => {
-      const markerSize = 8;
+      const markerSize = 12;
       const left = doc.page.margins.left;
       const top = doc.page.margins.top;
       const right = doc.page.width - doc.page.margins.right;
@@ -1811,7 +1969,7 @@ export const downloadOmrSheet = async (req, res) => {
 
     // Helper to draw anchor points at 4 corners of a box
     const drawAnchorPoints = (boxX, boxY, boxWidth, boxHeight) => {
-      const anchorSize = 6; // Size of anchor point squares
+      const anchorSize = 10; // Larger anchors improve detection in photographed sheets
       doc.fillColor("black");
       
       // Top-left
@@ -2180,20 +2338,9 @@ export const uploadOmrImage = async (req, res) => {
           status: scannerConfigured ? "failed" : "pending",
           reason:
             scanErrorMessage ||
-            "Cần gửi mssv/ma_de/answers hoặc cấu hình OMR_SCANNER_API_URL để backend tự quét",
+            "Backend chưa đọc được dữ liệu OMR từ ảnh. Hãy kiểm tra ảnh có đủ 4 marker đen, không bị mờ hoặc cắt góc.",
         },
       });
-    }
-
-    const manualMssv =
-      req.body?.mssv_override ?? req.body?.mssvOverride ?? req.body?.mssv ?? null;
-    const manualMaDe =
-      req.body?.ma_de_override ?? req.body?.maDeOverride ?? req.body?.ma_de ?? req.body?.maDe ?? null;
-    if (manualMssv) {
-      scanPayload.mssv = String(manualMssv).trim();
-    }
-    if (manualMaDe) {
-      scanPayload.maDe = String(manualMaDe).trim();
     }
 
     let gradingResult = null;
@@ -2221,8 +2368,6 @@ export const uploadOmrImage = async (req, res) => {
             scanned: {
               mssv: scanPayload.mssv,
               maDe: scanPayload.maDe || null,
-              manualMssvApplied: Boolean(manualMssv),
-              manualMaDeApplied: Boolean(manualMaDe),
               answersCount: Array.isArray(scanPayload.answersInput)
                 ? scanPayload.answersInput.filter(Boolean).length
                 : null,

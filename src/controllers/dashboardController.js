@@ -1,5 +1,5 @@
 import { Op, fn, col } from "sequelize";
-import { Account, KyThi, CauHoi, BaiLam, MonHoc } from "../models/index.js";
+import { Account, KyThi, CauHoi, BaiLam, MonHoc, LopHoc, User } from "../models/index.js";
 
 const getRelativeTimeVi = (dateValue) => {
   const date = dateValue ? new Date(dateValue) : null;
@@ -28,6 +28,21 @@ const getRoleLabelVi = (role) => {
   if (role === "admin") return "Admin";
   if (role === "giangvien") return "Giảng viên";
   return "Sinh viên";
+};
+
+const getTeacherSubjectWhere = async (req) => {
+  if (req.user?.role !== "giangvien") return {};
+
+  const account = await Account.findByPk(req.user.id, { attributes: ["user_id"], raw: true });
+  if (!account?.user_id) return { mon_hoc_id: -1 };
+
+  const subject = await MonHoc.findOne({
+    where: { giang_vien_id: account.user_id },
+    attributes: ["id"],
+    raw: true,
+  });
+
+  return subject ? { mon_hoc_id: subject.id } : { mon_hoc_id: -1 };
 };
 
 export const getDashboard = async (req, res) => {
@@ -95,10 +110,45 @@ export const getDashboardStats = async (req, res) => {
   try {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
 
+    let assignedSubject = null;
+    if (req.user?.role === "giangvien") {
+      const account = await Account.findByPk(req.user.id, { attributes: ["user_id"], raw: true });
+      if (account?.user_id) {
+        const subject = await MonHoc.findOne({
+          where: { giang_vien_id: account.user_id },
+          attributes: ["id", "ten_mon_hoc", "lop_id"],
+          include: [
+            {
+              model: User,
+              as: "giang_vien",
+              attributes: ["id", "ho_ten"],
+              required: false,
+            },
+            {
+              model: LopHoc,
+              as: "lop_hoc",
+              attributes: ["id", "ten_lop", "hoc_ky", "nam_hoc"],
+              required: false,
+            },
+          ],
+        });
+
+        assignedSubject = subject ? subject.toJSON() : null;
+      }
+    }
+
+    const teacherSubjectWhere = await getTeacherSubjectWhere(req);
+    const examRowsForStats = Object.keys(teacherSubjectWhere).length > 0
+      ? await KyThi.findAll({ where: teacherSubjectWhere, attributes: ["id"], raw: true })
+      : [];
+    const examIdsForStats = examRowsForStats.map((item) => item.id);
+
     const studentsCount = await Account.count({ where: { role: "sinhvien" } });
 
-    const examsCreated = await KyThi.count();
-    const questionsBank = await CauHoi.count();
+    const examsCreated = await KyThi.count({ where: teacherSubjectWhere });
+    const questionsBank = await CauHoi.count({
+      where: assignedSubject ? { mon_hoc_id: assignedSubject.id } : {},
+    });
 
     const avgScoreRow = await BaiLam.findOne({
       attributes: [[fn("AVG", col("tong_diem")), "avgScore"]],
@@ -106,6 +156,9 @@ export const getDashboardStats = async (req, res) => {
         tong_diem: {
           [Op.ne]: null,
         },
+        ...(Object.keys(teacherSubjectWhere).length > 0
+          ? { ky_thi_id: { [Op.in]: examIdsForStats.length > 0 ? examIdsForStats : [-1] } }
+          : {}),
       },
       raw: true,
     });
@@ -117,6 +170,7 @@ export const getDashboardStats = async (req, res) => {
       examsCreated,
       questionsBank,
       avgClassScore: Number(avgClassScore),
+      assignedSubject,
     });
   } catch (error) {
     console.error("getDashboardStats error:", error);
@@ -131,9 +185,11 @@ export const getRecentExams = async (req, res) => {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
 
     const examAttributes = ["id", "ten_ky_thi", "createdAt"];
+    const teacherSubjectWhere = await getTeacherSubjectWhere(req);
 
     const exams = await KyThi.findAll({
       attributes: examAttributes,
+      where: teacherSubjectWhere,
       order: [["createdAt", "DESC"]],
       limit: 5,
     });

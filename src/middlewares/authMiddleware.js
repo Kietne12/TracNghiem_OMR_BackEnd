@@ -1,17 +1,27 @@
-import jwt from "jsonwebtoken";
-import { Account, User } from "../models/index.js";
+﻿import jwt from "jsonwebtoken";
+import { Account, CaiDatHeThong, User } from "../models/index.js";
 
-const LOCKED_MESSAGE = "Tài khoản đã bị khóa do đăng nhập sai quá nhiều";
+const LOCKED_MESSAGE = "Tài khoản đã bị khóa do đăng nhập sai quá nhiều lần.";
+const DEFAULT_SESSION_MINUTES = 30;
+
+const normalizeSessionMinutes = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_SESSION_MINUTES;
+  }
+
+  return parsed;
+};
 
 /**
- * Middleware xác thực token JWT
+ * Middleware xÃ¡c thá»±c token JWT
  */
 export const verifyToken = async (req, res, next) => {
   const authHeader = req.headers["authorization"];
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({
-      message: "Không có token, truy cập bị từ chối",
+      message: "KhÃ´ng cÃ³ token, truy cáº­p bá»‹ tá»« chá»‘i",
     });
   }
 
@@ -31,7 +41,7 @@ export const verifyToken = async (req, res, next) => {
 
     if (!account) {
       return res.status(401).json({
-        message: "Tài khoản không tồn tại",
+        message: "TÃ i khoáº£n khÃ´ng tá»“n táº¡i",
       });
     }
 
@@ -47,22 +57,40 @@ export const verifyToken = async (req, res, next) => {
       user_id: account.user_id,
     };
 
+    const settings = await CaiDatHeThong.findOne({
+      attributes: ["thoi_gian_phien"],
+      raw: true,
+    });
+    const sessionMinutes = normalizeSessionMinutes(settings?.thoi_gian_phien);
+    const refreshedToken = jwt.sign(
+      {
+        id: account.id,
+        role: account.role,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: `${sessionMinutes}m` }
+    );
+
+    res.setHeader("X-Session-Token", refreshedToken);
+    res.setHeader("X-Session-Timeout-Minutes", String(sessionMinutes));
+    res.setHeader("X-Session-Timeout-Ms", String(sessionMinutes * 60 * 1000));
+
     next();
   } catch (error) {
     return res.status(403).json({
-      message: "Token không hợp lệ hoặc đã hết hạn",
+      message: "Token khÃ´ng há»£p lá»‡ hoáº·c Ä‘Ã£ háº¿t háº¡n",
     });
   }
 };
 
 /**
- * Middleware kiểm tra role
+ * Middleware kiá»ƒm tra role
  */
 export const authorizeRoles = (...roles) => {
   return (req, res, next) => {
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({
-        message: "Bạn không có quyền truy cập",
+        message: "Báº¡n khÃ´ng cÃ³ quyá»n truy cáº­p",
       });
     }
 

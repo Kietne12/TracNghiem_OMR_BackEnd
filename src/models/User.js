@@ -22,6 +22,11 @@ const User = sequelize.define("nguoi_dung", {
     },
   },
 
+  avatar: {
+    type: DataTypes.TEXT("long"),
+    allowNull: true,
+  },
+
   mssv: {
     type: DataTypes.STRING(20),
     unique: true,

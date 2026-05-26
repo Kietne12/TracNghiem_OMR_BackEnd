@@ -7,6 +7,7 @@ import {
   CauHoi,
   LopHoc,
   LopSinhVien,
+  MonHoc,
   User,
 } from "../models/index.js";
 
@@ -53,6 +54,26 @@ const getUserIdFromAccount = async (accountId) => {
   if (!accountId) return null;
   const account = await Account.findByPk(accountId, { raw: true });
   return account?.user_id || null;
+};
+
+const getAssignedSubjectForTeacher = async (teacherUserId) => {
+  if (!teacherUserId) return null;
+  return MonHoc.findOne({
+    where: { giang_vien_id: teacherUserId },
+    attributes: ["id", "lop_id", "ten_mon_hoc"],
+    raw: true,
+  });
+};
+
+const ensureTeacherPracticeAccess = async (req, practice) => {
+  if (req.user?.role !== "giangvien") return true;
+
+  const teacherUserId = await getUserIdFromAccount(req.user?.id);
+  const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+  return Boolean(
+    assignedSubject &&
+    Number(practice.mon_hoc_id) === Number(assignedSubject.id)
+  );
 };
 
 const resolveStudentUserId = async (req, explicitUserId = null) => {
@@ -102,8 +123,8 @@ const normalizePracticeConfigInput = (body = {}, existing = {}) => {
     nam_hoc: input.nam_hoc ?? body.nam_hoc ?? existing.nam_hoc ?? null,
     tong_so_cau: tongSoCau,
     cach_tao_de: cachTaoDe,
-    tron_cau_hoi: toBoolean(input.tron_cau_hoi ?? existing.tron_cau_hoi, true),
-    tron_dap_an: toBoolean(input.tron_dap_an ?? existing.tron_dap_an, true),
+    tron_cau_hoi: false,
+    tron_dap_an: false,
     so_cau_de: toPositiveInt(input.so_cau_de ?? existing.so_cau_de, Math.floor(tongSoCau / 3)),
     so_cau_trung_binh: toPositiveInt(
       input.so_cau_trung_binh ?? existing.so_cau_trung_binh,
@@ -187,6 +208,18 @@ const resolvePracticeQuestionIds = async ({ monHocId, teacherUserId, config }) =
   const medium = pool.filter((q) => Number(q.do_kho) === 2);
   const hard = pool.filter((q) => Number(q.do_kho) === 3);
 
+  if (easy.length < config.so_cau_de) {
+    throw badRequestError(`Không đủ câu hỏi dễ. Hiện có ${easy.length}, cần ${config.so_cau_de}`);
+  }
+
+  if (medium.length < config.so_cau_trung_binh) {
+    throw badRequestError(`Không đủ câu hỏi trung bình. Hiện có ${medium.length}, cần ${config.so_cau_trung_binh}`);
+  }
+
+  if (hard.length < config.so_cau_kho) {
+    throw badRequestError(`Không đủ câu hỏi khó. Hiện có ${hard.length}, cần ${config.so_cau_kho}`);
+  }
+
   const selected = [
     ...pickRandom(easy, config.so_cau_de),
     ...pickRandom(medium, config.so_cau_trung_binh),
@@ -245,6 +278,15 @@ export const createPractice = async (req, res) => {
     }
 
     const teacherUserId = await getUserIdFromAccount(req.user?.id);
+    const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+    const effectiveMonHocId = assignedSubject?.id || mon_hoc_id || 1;
+    if (assignedSubject?.lop_id && Number(lop_id) !== Number(assignedSubject.lop_id)) {
+      return res.status(403).json({
+        success: false,
+        error: "Giảng viên chỉ được tạo bài luyện tập cho lớp/môn đã phân công",
+      });
+    }
+
     const normalizedConfig = normalizePracticeConfigInput(req.body, {
       tong_so_cau: so_cau,
       hoc_ky: lop.hoc_ky,
@@ -255,13 +297,13 @@ export const createPractice = async (req, res) => {
     if (!normalizedConfig.nam_hoc) normalizedConfig.nam_hoc = lop.nam_hoc || null;
 
     const questionIds = await resolvePracticeQuestionIds({
-      monHocId: mon_hoc_id || 1,
+      monHocId: effectiveMonHocId,
       teacherUserId,
       config: normalizedConfig,
     });
 
     const practice = await BaiLuyenTap.create({
-      mon_hoc_id: mon_hoc_id || 1,
+      mon_hoc_id: effectiveMonHocId,
       lop_id,
       ten_bai,
       mo_ta: mo_ta || "",
@@ -302,9 +344,22 @@ export const getPracticeList = async (req, res) => {
           data: [],
         });
       }
+    } else if (req.user?.role === "giangvien") {
+      const teacherUserId = await getUserIdFromAccount(req.user?.id);
+      const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+      if (!assignedSubject) {
+        return res.json({
+          success: true,
+          data: [],
+        });
+      }
+      whereClause.mon_hoc_id = assignedSubject.id;
+      if (assignedSubject.lop_id) {
+        whereClause.lop_id = assignedSubject.lop_id;
+      }
     }
 
-    if (lop_id) {
+    if (lop_id && req.user?.role !== "giangvien") {
       const parsedClassId = Number(lop_id);
       if (!Number.isInteger(parsedClassId) || parsedClassId <= 0) {
         return res.status(400).json({
@@ -325,7 +380,7 @@ export const getPracticeList = async (req, res) => {
       whereClause.lop_id = { [Op.in]: assignedClassIds };
     }
 
-    if (mon_hoc_id) whereClause.mon_hoc_id = Number(mon_hoc_id);
+    if (mon_hoc_id && req.user?.role !== "giangvien") whereClause.mon_hoc_id = Number(mon_hoc_id);
 
     const classWhere = {};
     if (semester) classWhere.hoc_ky = semester;
@@ -389,6 +444,12 @@ export const getPracticeDetail = async (req, res) => {
         error: "Practice not found",
       });
     }
+    if (!(await ensureTeacherPracticeAccess(req, practice))) {
+      return res.status(403).json({
+        success: false,
+        error: "Không có quyền xem bài luyện tập của môn này",
+      });
+    }
 
     res.json({
       success: true,
@@ -414,12 +475,19 @@ export const updatePractice = async (req, res) => {
         error: "Practice not found",
       });
     }
+    if (!(await ensureTeacherPracticeAccess(req, practice))) {
+      return res.status(403).json({
+        success: false,
+        error: "Không có quyền cập nhật bài luyện tập của môn này",
+      });
+    }
 
     const currentConfig = practice.cau_hinh || {};
     const normalizedConfig = normalizePracticeConfigInput(req.body, currentConfig);
 
     const teacherUserId = await getUserIdFromAccount(req.user?.id);
-    const monHocId = req.body.mon_hoc_id || practice.mon_hoc_id || 1;
+    const assignedSubject = await getAssignedSubjectForTeacher(teacherUserId);
+    const monHocId = assignedSubject?.id || req.body.mon_hoc_id || practice.mon_hoc_id || 1;
     const questionIds = await resolvePracticeQuestionIds({
       monHocId,
       teacherUserId,
@@ -463,6 +531,12 @@ export const deletePractice = async (req, res) => {
       return res.status(404).json({
         success: false,
         error: "Practice not found",
+      });
+    }
+    if (!(await ensureTeacherPracticeAccess(req, practice))) {
+      return res.status(403).json({
+        success: false,
+        error: "Không có quyền xóa bài luyện tập của môn này",
       });
     }
 
@@ -696,6 +770,23 @@ export const submitPractice = async (req, res) => {
       });
     }
 
+    const answerMap = new Map();
+    answers.forEach((item) => {
+      const questionId = Number(item?.cau_hoi_id);
+      const normalized = String(item?.dap_an_student || "").trim().toUpperCase();
+      if (Number.isInteger(questionId) && questionId > 0) {
+        answerMap.set(questionId, ["A", "B", "C", "D"].includes(normalized) ? normalized : null);
+      }
+    });
+
+    const missingQuestion = allowedQuestionIds.find((id) => !answerMap.has(id) || !answerMap.get(id));
+    if (missingQuestion) {
+      return res.status(400).json({
+        success: false,
+        error: "Bạn cần chọn đủ đáp án trước khi nộp bài",
+      });
+    }
+
     const questions = await CauHoi.findAll({
       where: { id: { [Op.in]: allowedQuestionIds } },
       attributes: ["id", "dap_an_dung"],
@@ -866,6 +957,19 @@ export const getPracticeHistoryForStudent = async (req, res) => {
 export const getPracticeStatistics = async (req, res) => {
   try {
     const { bai_luyen_tap_id } = req.params;
+    const practice = await BaiLuyenTap.findByPk(bai_luyen_tap_id);
+    if (!practice) {
+      return res.status(404).json({
+        success: false,
+        error: "Practice not found",
+      });
+    }
+    if (!(await ensureTeacherPracticeAccess(req, practice))) {
+      return res.status(403).json({
+        success: false,
+        error: "Không có quyền xem thống kê bài luyện tập của môn này",
+      });
+    }
 
     const history = await LichSuBaiLuyenTap.findAll({
       where: {

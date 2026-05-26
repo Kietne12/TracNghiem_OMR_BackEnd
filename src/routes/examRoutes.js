@@ -10,6 +10,7 @@ import {
   getExamById,
   submitExam,
   getClasses,
+  getSubjectsForLearning,
   updateExamConfig,
   getOmrTemplate,
   uploadOmrImage,
@@ -39,6 +40,7 @@ const upload = multer({ storage });
 
 // ===== CLASSES =====
 router.get("/classes", getClasses);
+router.get("/subjects", getSubjectsForLearning);
 
 // ===== EXAMS =====
 router.post("/", createExam);

@@ -5,6 +5,7 @@ const router = express.Router();
 
 // GET ALL
 router.get("/", controller.getAccounts);
+router.get("/meta", controller.getAccountMeta);
 
 // CREATE
 router.post("/", controller.createAccount);

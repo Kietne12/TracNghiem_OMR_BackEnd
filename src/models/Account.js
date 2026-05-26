@@ -36,6 +36,21 @@ const Account = sequelize.define(
       type: DataTypes.INTEGER,
       defaultValue: 0,
     },
+
+    must_change_password: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+
+    reset_code_hash: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+    },
+
+    reset_code_expires_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   },
   {
     hooks: {

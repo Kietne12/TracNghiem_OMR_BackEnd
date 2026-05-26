@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { processScanResult, uploadOmrImageOnly } from "../controllers/omrScannerController.js";
+import { processScanResult } from "../controllers/omrScannerController.js";
 
 const router = Router();
 
-// Endpoint để Python module gửi kết quả quét OMR
+// Endpoint cho scanner bên ngoài gửi kết quả OMR đã đọc.
 router.post("/process-scan", processScanResult);
 
 export default router;

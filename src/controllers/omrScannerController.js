@@ -1,4 +1,4 @@
-import { KyThi, CauHinhKyThi, CauHoiKyThi, CauHoi, User, BaiLam, ChiTietBaiLam, KetQuaOMR, FileOMR } from "../models/index.js";
+import { KyThi, CauHinhKyThi, CauHoiKyThi, CauHoi, User, BaiLam, ChiTietBaiLam, KetQuaOMR } from "../models/index.js";
 import { Op } from "sequelize";
 
 const ANSWER_LETTERS = ["A", "B", "C", "D"];
@@ -8,7 +8,6 @@ const normalizeAnswerChoice = (choice) => {
   const normalized = String(choice).trim().toUpperCase();
   return ANSWER_LETTERS.includes(normalized) ? normalized : null;
 };
-
 // Helper function for flexible MSSV matching (handles padding mismatches like 0001 vs 00001)
 const findStudentByFlexibleMSSV = async (mssv) => {
   if (!mssv) return null;
@@ -185,49 +184,5 @@ export const processScanResult = async (req, res) => {
   } catch (error) {
     console.error("processScanResult error:", error);
     return res.status(500).json({ message: error.message || "Lỗi khi xử lý kết quả quét OMR" });
-  }
-};
-
-export const uploadOmrImageOnly = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const exam = await KyThi.findByPk(id);
-
-    if (!exam) {
-      return res.status(404).json({ message: "Không tìm thấy kỳ thi" });
-    }
-
-    const config = await CauHinhKyThi.findOne({
-      where: { ky_thi_id: id },
-      raw: true,
-    });
-
-    if (!config || config.hinh_thuc_thi !== "omr") {
-      return res.status(400).json({ message: "Kỳ thi này không ở chế độ OMR" });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ message: "Vui lòng chọn ảnh phiếu OMR" });
-    }
-
-    const fileRecord = await FileOMR.create({
-      ky_thi_id: exam.id,
-      ten_file: req.file.originalname,
-      duong_dan: `/uploads/omr/${req.file.filename}`,
-      ngay_tai_len: new Date(),
-    });
-
-    return res.status(201).json({
-      message: "Đã tải ảnh OMR. Chờ Python module quét kết quả...",
-      file: {
-        id: fileRecord.id,
-        ten_file: fileRecord.ten_file,
-        duong_dan: fileRecord.duong_dan,
-      },
-      next_step: "Python module sẽ quét MSSV/mã đề/đáp án từ ảnh, rồi gọi /api/omr/process-scan để chấm điểm",
-    });
-  } catch (error) {
-    console.error("uploadOmrImageOnly error:", error);
-    return res.status(500).json({ message: error.message || "Lỗi khi tải ảnh OMR" });
   }
 };

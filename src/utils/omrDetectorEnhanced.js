@@ -1,11 +1,8 @@
-import sharp from 'sharp';
-import Tesseract from 'tesseract.js';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import fs from "fs";
+import sharp from "sharp";
+import { getOmrLayout, toLocalPoint } from "./omrLayout.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const ANSWER_CHOICES = ["A", "B", "C", "D"];
 
 const toBoxFromCircle = (centerX, centerY, radius) => ({
   left: Math.round(centerX - radius),
@@ -21,685 +18,611 @@ const logRegionBox = (group, label, box, extra = "") => {
   );
 };
 
-/**
- * Enhanced OMR Detector with Anchor Point Detection & Perspective Correction
- * 
- * Architecture:
- * 1. Detect anchor points (4 black corners at each region)
- * 2. Apply perspective transform to straighten rotated/skewed images
- * 3. Extract ROI for each region (SBD, Mã đề, Answers)
- * 4. Perform per-region detection on corrected ROIs
- */
+const clampExtractBox = (box, width, height) => ({
+  left: Math.max(0, Math.min(width - 1, Math.round(box.left))),
+  top: Math.max(0, Math.min(height - 1, Math.round(box.top))),
+  width: Math.max(1, Math.min(width - Math.round(box.left), Math.round(box.width))),
+  height: Math.max(1, Math.min(height - Math.round(box.top), Math.round(box.height))),
+});
 
-/**
- * Main detection function with enhancement pipeline
- */
-export const detectOMRMarkings = async (imagePath) => {
-  if (!fs.existsSync(imagePath)) {
-    throw new Error(`Ảnh OMR không tồn tại: ${imagePath}`);
-  }
+const generatePlaceholder = (length) => "0".repeat(length);
 
-  try {
-    console.log('\n════════════════════════════════════════');
-    console.log('   🔍 ENHANCED OMR DETECTION PIPELINE');
-    console.log('════════════════════════════════════════');
+const MAX_PROCESSING_SIDE = 1800;
 
-    const imageBuffer = fs.readFileSync(imagePath);
+const sampleBubble = (data, width, height, center, radius, threshold = 170) => {
+  const outerRadius = Math.max(4, Math.round(radius));
+  const innerRadius = Math.max(2, Math.round(outerRadius * 0.58));
+  let innerDark = 0;
+  let innerTotal = 0;
+  let ringDark = 0;
+  let ringTotal = 0;
 
-    // Normalize orientation first (apply EXIF rotation), then normalize format if needed.
-    let normalizedBuffer = await sharp(imageBuffer).rotate().toBuffer();
-    let metadata = await sharp(normalizedBuffer).metadata();
+  for (let dy = -outerRadius; dy <= outerRadius; dy += 1) {
+    for (let dx = -outerRadius; dx <= outerRadius; dx += 1) {
+      const distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared > outerRadius * outerRadius) continue;
 
-    // OMR template in this project is portrait. If input is landscape, rotate to portrait.
-    if ((metadata.width || 0) > (metadata.height || 0)) {
-      normalizedBuffer = await sharp(normalizedBuffer).rotate(90).toBuffer();
-      metadata = await sharp(normalizedBuffer).metadata();
-      console.log('   ↻ Ảnh đầu vào đang ngang, đã xoay về dọc để quét OMR');
-    }
+      const x = Math.round(center.x + dx);
+      const y = Math.round(center.y + dy);
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
 
-    if (metadata.format !== 'jpeg' && metadata.format !== 'png') {
-      normalizedBuffer = await sharp(normalizedBuffer).png().toBuffer();
-      metadata = await sharp(normalizedBuffer).metadata();
-    }
+      const value = data[y * width + x];
+      const isDark = value < threshold;
 
-    console.log(`   📸 Kích thước ảnh sau chuẩn hóa: ${metadata.width}x${metadata.height}`);
-
-    // Calculate layout scale based on image size
-    const layoutScale = metadata.width / 2480; // Assume A4 @ 300dpi
-    
-    const layoutParams = {
-      pageWidth: metadata.width,
-      pageHeight: metadata.height,
-      layoutScale: layoutScale,
-      marginLeft: Math.round(50 * layoutScale),
-      marginTop: Math.round(50 * layoutScale),
-    };
-
-    // ===== STEP 1: Try to detect anchor points for perspective correction =====
-    console.log('\n   📍 STEP 1: Tìm kiếm các điểm neo (anchor points)...');
-    const anchorPoints = await detectAnchorPoints(normalizedBuffer, metadata);
-    
-    let correctedBuffer = normalizedBuffer;
-    let perspectiveApplied = false;
-
-    if (anchorPoints && anchorPoints.length >= 4) {
-      console.log('   ✓ Tìm thấy 4 điểm neo, áp dụng perspective transform...');
-      try {
-        correctedBuffer = await applyPerspectiveTransform(
-          normalizedBuffer,
-          metadata,
-          anchorPoints
-        );
-        perspectiveApplied = true;
-        console.log('   ✓ Perspective transform hoàn tất');
-      } catch (err) {
-        console.warn(`   ⚠ Perspective transform thất bại: ${err.message}`);
-        console.log('   → Tiếp tục với ảnh gốc...');
+      if (distanceSquared <= innerRadius * innerRadius) {
+        innerTotal += 1;
+        if (isDark) innerDark += 1;
+      } else {
+        ringTotal += 1;
+        if (isDark) ringDark += 1;
       }
-    } else {
-      console.log('   ⚠ Không tìm thấy đủ điểm neo (anchor points)');
-      console.log('   → Tiếp tục với ảnh gốc (có thể kém chính xác nếu ảnh bị lệch)');
     }
-
-    // ===== STEP 2: Extract ROI for each region =====
-    console.log('\n   📐 STEP 2: Trích xuất vùng quan tâm (ROI)...');
-    const roiData = await extractRegionROIs(correctedBuffer, metadata, layoutParams);
-
-    // ===== STEP 3: Detect SBD (Student Number) =====
-    console.log('\n   🔍 STEP 3: Quét số báo danh...');
-    const mssv = await detectStudentNumberEnhanced(roiData.sbd);
-
-    // ===== STEP 4: Detect Mã Đề (Exam Code) =====
-    console.log('\n   🔍 STEP 4: Quét mã đề...');
-    const maDe = await detectExamCodeEnhanced(roiData.madeDe);
-
-    // ===== STEP 5: Detect Answers =====
-    console.log('\n   🔍 STEP 5: Quét đáp án...');
-    const answers = await detectAnswersEnhanced(roiData.answers);
-
-    console.log('\n════════════════════════════════════════');
-    console.log('   ✅ DETECTION COMPLETE');
-    console.log('════════════════════════════════════════\n');
-
-    return {
-      mssv: mssv || generatePlaceholder(5),
-      maDe: maDe || generatePlaceholder(3),
-      answers: answers || new Array(60).fill(null),
-      perspectiveApplied: perspectiveApplied,
-      anchorsDetected: anchorPoints && anchorPoints.length >= 4,
-    };
-  } catch (error) {
-    console.error('❌ Lỗi khi quét OMR:', error.message);
-    throw error;
   }
+
+  const innerRatio = innerTotal > 0 ? innerDark / innerTotal : 0;
+  const ringRatio = ringTotal > 0 ? ringDark / ringTotal : 0;
+  const score = innerRatio - ringRatio * 0.35;
+
+  return {
+    innerRatio,
+    ringRatio,
+    score,
+  };
 };
 
-/**
- * Detect anchor points (4 black 6px squares at corners)
- * Returns array of corner points: [topLeft, topRight, bottomLeft, bottomRight]
- */
+const scoreBubbleGeometry = (data, width, height, center, radius, threshold = 170) => {
+  const outerRadius = Math.max(4, Math.round(radius));
+  const innerRadius = Math.max(2, Math.round(outerRadius * 0.55));
+  const ringInnerRadius = Math.max(innerRadius + 1, Math.round(outerRadius * 0.7));
+  let innerDark = 0;
+  let innerTotal = 0;
+  let ringDark = 0;
+  let ringTotal = 0;
+
+  for (let dy = -outerRadius; dy <= outerRadius; dy += 1) {
+    for (let dx = -outerRadius; dx <= outerRadius; dx += 1) {
+      const distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared > outerRadius * outerRadius) continue;
+
+      const x = Math.round(center.x + dx);
+      const y = Math.round(center.y + dy);
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+
+      const value = data[y * width + x];
+      const isDark = value < threshold;
+
+      if (distanceSquared <= innerRadius * innerRadius) {
+        innerTotal += 1;
+        if (isDark) innerDark += 1;
+      } else if (distanceSquared >= ringInnerRadius * ringInnerRadius) {
+        ringTotal += 1;
+        if (isDark) ringDark += 1;
+      }
+    }
+  }
+
+  const innerRatio = innerTotal > 0 ? innerDark / innerTotal : 0;
+  const ringRatio = ringTotal > 0 ? ringDark / ringTotal : 0;
+  return ringRatio * 0.85 + innerRatio * 0.15;
+};
+
+const refineBubbleCenter = (data, width, height, center, radius, threshold = 170) => {
+  const searchRadius = Math.max(3, Math.round(radius * 0.8));
+  let bestCenter = { ...center };
+  let bestScore = scoreBubbleGeometry(data, width, height, center, radius, threshold);
+
+  for (let dy = -searchRadius; dy <= searchRadius; dy += 2) {
+    for (let dx = -searchRadius; dx <= searchRadius; dx += 2) {
+      const candidate = {
+        x: center.x + dx,
+        y: center.y + dy,
+      };
+      const score = scoreBubbleGeometry(data, width, height, candidate, radius, threshold);
+      if (score > bestScore) {
+        bestScore = score;
+        bestCenter = candidate;
+      }
+    }
+  }
+
+  return bestCenter;
+};
+
+const solveLinearSystem = (matrix, vector) => {
+  const n = vector.length;
+  const a = matrix.map((row, index) => [...row, vector[index]]);
+
+  for (let column = 0; column < n; column += 1) {
+    let pivotRow = column;
+    for (let row = column + 1; row < n; row += 1) {
+      if (Math.abs(a[row][column]) > Math.abs(a[pivotRow][column])) {
+        pivotRow = row;
+      }
+    }
+
+    if (Math.abs(a[pivotRow][column]) < 1e-9) {
+      throw new Error("Khong giai duoc ma tran bien doi phoi canh");
+    }
+
+    [a[column], a[pivotRow]] = [a[pivotRow], a[column]];
+    const pivot = a[column][column];
+    for (let col = column; col <= n; col += 1) {
+      a[column][col] /= pivot;
+    }
+
+    for (let row = 0; row < n; row += 1) {
+      if (row === column) continue;
+      const factor = a[row][column];
+      for (let col = column; col <= n; col += 1) {
+        a[row][col] -= factor * a[column][col];
+      }
+    }
+  }
+
+  return a.map((row) => row[n]);
+};
+
+const computeHomography = (sourcePoints, destinationPoints) => {
+  const matrix = [];
+  const vector = [];
+
+  sourcePoints.forEach((source, index) => {
+    const destination = destinationPoints[index];
+    const { x, y } = source;
+    const u = destination.x;
+    const v = destination.y;
+
+    matrix.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
+    vector.push(u);
+    matrix.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
+    vector.push(v);
+  });
+
+  const h = solveLinearSystem(matrix, vector);
+  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+};
+
+const applyHomography = (homography, point) => {
+  const denominator = homography[6] * point.x + homography[7] * point.y + homography[8];
+  return {
+    x: (homography[0] * point.x + homography[1] * point.y + homography[2]) / denominator,
+    y: (homography[3] * point.x + homography[4] * point.y + homography[5]) / denominator,
+  };
+};
+
 const detectAnchorPoints = async (imageBuffer, metadata) => {
   try {
-    // Giảm kích thước trước khi detect để tăng tốc STEP 1 rõ rệt
     const targetWidth = 900;
-    const resizedBuffer = await sharp(imageBuffer)
+    const { data, info } = await sharp(imageBuffer)
       .resize({ width: targetWidth, withoutEnlargement: true })
       .grayscale()
       .threshold(110)
       .raw()
       .toBuffer({ resolveWithObject: true });
 
-    const { data, info } = resizedBuffer;
     const { width, height } = info;
-
-    // Tỷ lệ scale để map tọa độ từ ảnh thu nhỏ về ảnh gốc
     const scaleX = metadata.width / width;
     const scaleY = metadata.height / height;
+    const cornerRatio = 0.18;
+    const cornerW = Math.max(60, Math.floor(width * cornerRatio));
+    const cornerH = Math.max(60, Math.floor(height * cornerRatio));
+    const minArea = 90;
+    const maxArea = 900;
+    const targetArea = 420;
 
-    // Chỉ quét 4 góc, tránh quét toàn ảnh (nhanh hơn rất nhiều)
-    const cornerRatio = 0.22;
-    const cornerW = Math.max(40, Math.floor(width * cornerRatio));
-    const cornerH = Math.max(40, Math.floor(height * cornerRatio));
-
-    const cornerRegions = [
-      { name: 'topLeft', x: 0, y: 0, w: cornerW, h: cornerH },
-      { name: 'topRight', x: width - cornerW, y: 0, w: cornerW, h: cornerH },
-      { name: 'bottomLeft', x: 0, y: height - cornerH, w: cornerW, h: cornerH },
-      { name: 'bottomRight', x: width - cornerW, y: height - cornerH, w: cornerW, h: cornerH },
+    const corners = [
+      { name: "topLeft", x: 0, y: 0, w: cornerW, h: cornerH },
+      { name: "topRight", x: width - cornerW, y: 0, w: cornerW, h: cornerH },
+      { name: "bottomLeft", x: 0, y: height - cornerH, w: cornerW, h: cornerH },
+      { name: "bottomRight", x: width - cornerW, y: height - cornerH, w: cornerW, h: cornerH },
     ];
 
-    const detectedAnchors = [];
-    for (const region of cornerRegions) {
-      const anchor = findAnchorInCornerRegion(data, width, height, region);
-      if (!anchor) continue;
+    const findInRegion = (region) => {
+      const visited = new Uint8Array(region.w * region.h);
+      const roiIndex = (x, y) => (y - region.y) * region.w + (x - region.x);
+      const isBlack = (x, y) => data[y * width + x] < 20;
+      let best = null;
 
-      // Quy đổi về tọa độ ảnh gốc
-      detectedAnchors.push({
-        x: Math.round(anchor.x * scaleX),
-        y: Math.round(anchor.y * scaleY),
-        size: anchor.size,
-        region: region.name,
-      });
-    }
+      for (let y = region.y; y < region.y + region.h; y += 1) {
+        for (let x = region.x; x < region.x + region.w; x += 1) {
+          const idx = roiIndex(x, y);
+          if (visited[idx]) continue;
+          visited[idx] = 1;
+          if (!isBlack(x, y)) continue;
 
-    if (detectedAnchors.length < 4) {
-      console.log(`   ℹ Tìm được ${detectedAnchors.length}/4 điểm neo ở 4 góc`);
-      return null;
-    }
+          const queue = [[x, y]];
+          let q = 0;
+          let area = 0;
+          let sumX = 0;
+          let sumY = 0;
+          let minX = x;
+          let maxX = x;
+          let minY = y;
+          let maxY = y;
 
-    // Bảo đảm thứ tự cố định: TL, TR, BL, BR
-    const topLeft = detectedAnchors.find((p) => p.region === 'topLeft');
-    const topRight = detectedAnchors.find((p) => p.region === 'topRight');
-    const bottomLeft = detectedAnchors.find((p) => p.region === 'bottomLeft');
-    const bottomRight = detectedAnchors.find((p) => p.region === 'bottomRight');
+          while (q < queue.length) {
+            const [cx, cy] = queue[q];
+            q += 1;
+            area += 1;
+            sumX += cx;
+            sumY += cy;
+            minX = Math.min(minX, cx);
+            maxX = Math.max(maxX, cx);
+            minY = Math.min(minY, cy);
+            maxY = Math.max(maxY, cy);
 
-    if (!topLeft || !topRight || !bottomLeft || !bottomRight) {
-      console.log('   ℹ Một hoặc nhiều góc không tìm được anchor rõ ràng');
-      return null;
-    }
+            const neighbors = [
+              [cx - 1, cy],
+              [cx + 1, cy],
+              [cx, cy - 1],
+              [cx, cy + 1],
+            ];
 
-    const anchorPoints = [topLeft, topRight, bottomLeft, bottomRight];
+            for (const [nx, ny] of neighbors) {
+              if (
+                nx < region.x ||
+                nx >= region.x + region.w ||
+                ny < region.y ||
+                ny >= region.y + region.h
+              ) {
+                continue;
+              }
 
-    console.log(`   ✓ Tìm thấy ${anchorPoints.length}/4 điểm neo:`);
-    anchorPoints.forEach((p, i) => {
-      console.log(`      [${i}] (${p.x}, ${p.y}) - size: ${p.size}px² - ${p.region}`);
-    });
+              const neighborIndex = roiIndex(nx, ny);
+              if (visited[neighborIndex]) continue;
+              visited[neighborIndex] = 1;
+              if (isBlack(nx, ny)) queue.push([nx, ny]);
+            }
+          }
 
-    return anchorPoints;
-  } catch (error) {
-    console.warn(`   ⚠ Lỗi detect anchor points: ${error.message}`);
-    return null;
-  }
-};
+          if (area < minArea || area > maxArea) continue;
+          const boxWidth = maxX - minX + 1;
+          const boxHeight = maxY - minY + 1;
+          const aspect = boxWidth / Math.max(1, boxHeight);
+          if (aspect < 0.5 || aspect > 1.8) continue;
+          const fillRatio = area / Math.max(1, boxWidth * boxHeight);
+          if (fillRatio < 0.45) continue;
 
-/**
- * Tìm anchor tốt nhất trong một vùng góc bằng connected-components
- */
-const findAnchorInCornerRegion = (data, width, height, region) => {
-  const xStart = Math.max(0, region.x);
-  const yStart = Math.max(0, region.y);
-  const xEnd = Math.min(width, region.x + region.w);
-  const yEnd = Math.min(height, region.y + region.h);
-
-  const roiW = xEnd - xStart;
-  const roiH = yEnd - yStart;
-  if (roiW <= 0 || roiH <= 0) return null;
-
-  const visited = new Uint8Array(roiW * roiH);
-  const toRoiIndex = (x, y) => (y - yStart) * roiW + (x - xStart);
-  const isBlack = (x, y) => data[y * width + x] < 20;
-
-  // Anchor là hình vuông nhỏ, sau resize thường còn khoảng 2x2 -> 8x8 px
-  const minArea = 4;
-  const maxArea = 220;
-  const targetArea = 30;
-
-  let best = null;
-
-  for (let y = yStart; y < yEnd; y++) {
-    for (let x = xStart; x < xEnd; x++) {
-      const ri = toRoiIndex(x, y);
-      if (visited[ri] === 1) continue;
-      if (!isBlack(x, y)) continue;
-
-      // BFS bằng queue + con trỏ index (không dùng shift để tránh chậm)
-      const queue = [[x, y]];
-      visited[ri] = 1;
-      let qIndex = 0;
-
-      let area = 0;
-      let sumX = 0;
-      let sumY = 0;
-
-      while (qIndex < queue.length) {
-        const [cx, cy] = queue[qIndex];
-        qIndex += 1;
-
-        area += 1;
-        sumX += cx;
-        sumY += cy;
-
-        const neighbors = [
-          [cx - 1, cy],
-          [cx + 1, cy],
-          [cx, cy - 1],
-          [cx, cy + 1],
-        ];
-
-        for (const [nx, ny] of neighbors) {
-          if (nx < xStart || nx >= xEnd || ny < yStart || ny >= yEnd) continue;
-          const nri = toRoiIndex(nx, ny);
-          if (visited[nri] === 1) continue;
-          visited[nri] = 1;
-          if (isBlack(nx, ny)) {
-            queue.push([nx, ny]);
+          const score =
+            Math.abs(area - targetArea) +
+            Math.abs(1 - aspect) * 80 +
+            Math.abs(0.9 - fillRatio) * 80;
+          if (!best || score < best.score) {
+            best = {
+              score,
+              x: sumX / area,
+              y: sumY / area,
+              area,
+            };
           }
         }
       }
 
-      if (area < minArea || area > maxArea) continue;
+      return best;
+    };
 
-      const centerX = Math.round(sumX / area);
-      const centerY = Math.round(sumY / area);
+    const detected = corners
+      .map((corner) => {
+        const anchor = findInRegion(corner);
+        if (!anchor) return null;
+        return {
+          region: corner.name,
+          x: Math.round(anchor.x * scaleX),
+          y: Math.round(anchor.y * scaleY),
+          size: anchor.area,
+        };
+      })
+      .filter(Boolean);
 
-      const score = Math.abs(area - targetArea);
-      if (!best || score < best.score) {
-        best = { x: centerX, y: centerY, size: area, score };
-      }
-    }
-  }
-
-  return best ? { x: best.x, y: best.y, size: best.size } : null;
-};
-
-/**
- * Apply perspective transform using detected anchor points
- * Simulates image flattening when page is at angle
- */
-const applyPerspectiveTransform = async (imageBuffer, metadata, anchorPoints) => {
-  try {
-    // For this implementation, use simple affine transformation
-    // A full homography would need more complex math
-
-    // Estimate rotation angle from anchor point positions
-    const topPoints = anchorPoints.slice(0, 2).sort((a, b) => a.x - b.x);
-    const angle = Math.atan2(
-      topPoints[1].y - topPoints[0].y,
-      topPoints[1].x - topPoints[0].x
-    ) * 180 / Math.PI;
-
-    console.log(`   📐 Độ xoay ước tính: ${angle.toFixed(1)}°`);
-
-    // Apply rotation correction using Sharp
-    if (Math.abs(angle) > 0.5) {
-      const correctedBuffer = await sharp(imageBuffer)
-        .rotate(angle * -1, { background: { r: 255, g: 255, b: 255 } })
-        .toBuffer();
-
-      return correctedBuffer;
+    if (detected.length < 4) {
+      console.log(`   i Tim duoc ${detected.length}/4 diem neo o 4 goc`);
+      return null;
     }
 
-    return imageBuffer;
+    const ordered = [
+      detected.find((item) => item.region === "topLeft"),
+      detected.find((item) => item.region === "topRight"),
+      detected.find((item) => item.region === "bottomLeft"),
+      detected.find((item) => item.region === "bottomRight"),
+    ];
+
+    if (ordered.some((item) => !item)) {
+      console.log("   i Thieu mot hoac nhieu diem neo ngoai");
+      return null;
+    }
+
+    console.log("   xac nhan du 4 diem neo ngoai");
+    return ordered;
   } catch (error) {
-    console.warn(`   ⚠ Perspective transform thất bại: ${error.message}`);
-    return imageBuffer; // Return original if transform fails
+    console.warn(`   ! Loi detect anchor points: ${error.message}`);
+    return null;
   }
 };
 
-/**
- * Extract ROI data for each region
- * Returns: { sbd: {...}, madeDe: {...}, answers: {...} }
- */
-const extractRegionROIs = async (imageBuffer, metadata, layoutParams) => {
+const applyPerspectiveTransform = async (imageBuffer, anchorPoints) => {
+  const topLeft = anchorPoints[0];
+  const topRight = anchorPoints[1];
+  const angle =
+    (Math.atan2(topRight.y - topLeft.y, topRight.x - topLeft.x) * 180) / Math.PI;
+
+  console.log(`   goc xoay uoc tinh: ${angle.toFixed(2)} do`);
+
+  // Skip minor/uncertain corrections; local bubble-center refinement is more stable here.
+  if (Math.abs(angle) <= 4 || Math.abs(angle) >= 12) return imageBuffer;
+
+  return sharp(imageBuffer)
+    .rotate(-angle, { background: { r: 255, g: 255, b: 255 } })
+    .toBuffer();
+};
+
+const normalizePageFromAnchors = async (imageBuffer, metadata, anchorPoints) => {
+  const templateWidth = 595.28;
+  const templateHeight = 841.89;
+  const scale = 3;
+  const outputWidth = Math.round(templateWidth * scale);
+  const outputHeight = Math.round(templateHeight * scale);
+  const destinationAnchors = [
+    { x: 24 * scale, y: 24 * scale },
+    { x: (templateWidth - 24) * scale, y: 24 * scale },
+    { x: 24 * scale, y: (templateHeight - 24) * scale },
+    { x: (templateWidth - 24) * scale, y: (templateHeight - 24) * scale },
+  ];
+
+  const sourceAnchors = anchorPoints.map((point) => ({ x: point.x, y: point.y }));
+  const destinationToSource = computeHomography(destinationAnchors, sourceAnchors);
+  const { data, info } = await sharp(imageBuffer)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const output = Buffer.alloc(outputWidth * outputHeight * 3, 255);
+
+  for (let y = 0; y < outputHeight; y += 1) {
+    for (let x = 0; x < outputWidth; x += 1) {
+      const source = applyHomography(destinationToSource, { x, y });
+      const sx = Math.round(source.x);
+      const sy = Math.round(source.y);
+      if (sx < 0 || sx >= info.width || sy < 0 || sy >= info.height) continue;
+
+      const sourceIndex = (sy * info.width + sx) * info.channels;
+      const outputIndex = (y * outputWidth + x) * 3;
+      output[outputIndex] = data[sourceIndex];
+      output[outputIndex + 1] = data[sourceIndex + 1] ?? data[sourceIndex];
+      output[outputIndex + 2] = data[sourceIndex + 2] ?? data[sourceIndex];
+    }
+  }
+
+  console.log(
+    `   da trai phang trang theo 4 marker ngoai: ${outputWidth}x${outputHeight}`
+  );
+
+  return sharp(output, {
+    raw: {
+      width: outputWidth,
+      height: outputHeight,
+      channels: 3,
+    },
+  })
+    .jpeg({ quality: 95 })
+    .toBuffer();
+};
+
+const buildRegionData = async (imageBuffer, imageWidth, imageHeight, box, points) => {
+  const extractBox = clampExtractBox(box, imageWidth, imageHeight);
+  const { data, info } = await sharp(imageBuffer)
+    .extract(extractBox)
+    .grayscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  return {
+    data,
+    info,
+    box: extractBox,
+    points: points.map((point) => ({
+      ...point,
+      localCenter: point.choice
+        ? refineBubbleCenter(
+            data,
+            info.width,
+            info.height,
+            toLocalPoint(extractBox, point.center),
+            point.radius,
+            175
+          )
+        : toLocalPoint(extractBox, point.center),
+    })),
+  };
+};
+
+const extractRegionROIs = async (imageBuffer, metadata) => {
+  const layout = getOmrLayout({
+    pageWidth: metadata.width,
+    pageHeight: metadata.height,
+  });
+
+  const sbdPoints = layout.sbd.bubbles.flatMap((column, columnIndex) =>
+    column.map((bubble, digit) => ({
+      columnIndex,
+      digit,
+      center: { x: bubble.x, y: bubble.y },
+      radius: bubble.radius,
+    }))
+  );
+
+  const maDePoints = layout.maDe.bubbles.flatMap((column, columnIndex) =>
+    column.map((bubble, digit) => ({
+      columnIndex,
+      digit,
+      center: { x: bubble.x, y: bubble.y },
+      radius: bubble.radius,
+    }))
+  );
+
+  const answerPoints = layout.answers.questions.flatMap((question) =>
+    question.bubbles.map((bubble) => ({
+      questionNumber: question.number,
+      choice: bubble.choice,
+      center: { x: bubble.x, y: bubble.y },
+      radius: bubble.radius,
+    }))
+  );
+
+  logRegionBox("ROI", "SBD", layout.sbd.box);
+  logRegionBox("ROI", "MADE", layout.maDe.box);
+  logRegionBox("ROI", "ANS", layout.answers.outerBox);
+
+  return {
+    sbd: await buildRegionData(imageBuffer, metadata.width, metadata.height, layout.sbd.box, sbdPoints),
+    maDe: await buildRegionData(
+      imageBuffer,
+      metadata.width,
+      metadata.height,
+      layout.maDe.box,
+      maDePoints
+    ),
+    answers: await buildRegionData(
+      imageBuffer,
+      metadata.width,
+      metadata.height,
+      layout.answers.outerBox,
+      answerPoints
+    ),
+  };
+};
+
+const detectDigits = (regionData, expectedColumns, label) => {
+  const { data, info, points } = regionData;
+  const digits = [];
+
+  for (let columnIndex = 0; columnIndex < expectedColumns; columnIndex += 1) {
+    const candidates = points
+      .filter((item) => item.columnIndex === columnIndex)
+      .map((item) => ({
+        digit: item.digit,
+        ...sampleBubble(data, info.width, info.height, item.localCenter, item.radius, 125),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    const best = candidates[0];
+    const second = candidates[1] || { score: 0 };
+    const selected = best && best.score > 0.085 && best.score - second.score > 0.015
+      ? best.digit
+      : 0;
+
+    const debug = candidates
+      .map((item) => `${item.digit}:${item.score.toFixed(3)}`)
+      .join(" | ");
+    console.log(`   [${label} C${columnIndex}] ${debug} -> ${selected}`);
+    digits.push(selected);
+  }
+
+  return digits.join("");
+};
+
+const detectAnswersEnhanced = (regionData) => {
+  const { data, info, points } = regionData;
+  const answers = [];
+
+  for (let questionNumber = 1; questionNumber <= 60; questionNumber += 1) {
+    const candidates = points
+      .filter((item) => item.questionNumber === questionNumber)
+      .map((item) => ({
+        choice: item.choice,
+        ...sampleBubble(data, info.width, info.height, item.localCenter, item.radius, 125),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    const best = candidates[0];
+    const second = candidates[1] || { score: 0 };
+    const selected =
+      best && best.score > 0.5 && best.score - second.score > 0.12 ? best.choice : null;
+    answers.push(selected);
+  }
+
+  const answeredCount = answers.filter(Boolean).length;
+  console.log(`   quet duoc ${answeredCount}/60 dap an da to`);
+  return answers;
+};
+
+export const detectOMRMarkings = async (imagePath) => {
+  if (!fs.existsSync(imagePath)) {
+    throw new Error(`Anh OMR khong ton tai: ${imagePath}`);
+  }
+
   try {
-    const { marginLeft, marginTop, layoutScale } = layoutParams;
-    const pageWidth = metadata.width;
-    const pageHeight = metadata.height;
+    console.log("\n========================================");
+    console.log("   ENHANCED OMR DETECTION PIPELINE");
+    console.log("========================================");
 
-    // Calculate layout dimensions based on template
-    const totalWidth = pageWidth - 2 * marginLeft;
-    const leftInfoWidth = totalWidth * 0.56;
-    const rightInfoX = marginLeft + leftInfoWidth + 10;
-    const rightInfoWidth = totalWidth - leftInfoWidth - 10;
-    const sbdBoxWidth = (rightInfoWidth - 10) * 0.65;
-    const rightInnerGap = 10;
-    const madeBoxWidth = rightInfoWidth - rightInnerGap - sbdBoxWidth;
-    // Use page-height ratios for photographed sheets; fixed pixel scaling is unstable here.
-    const infoTop = Math.round(pageHeight * 0.14);
-    const infoBoxHeight = Math.round(pageHeight * 0.33);
+    const fileBuffer = fs.readFileSync(imagePath);
+    let normalizedBuffer = await sharp(fileBuffer)
+      .rotate()
+      .resize({
+        width: MAX_PROCESSING_SIDE,
+        height: MAX_PROCESSING_SIDE,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+    let metadata = await sharp(normalizedBuffer).metadata();
 
-    // Extract SBD region
-    console.log(`   → Trích xuất vùng SBD...`);
-    const sbdExtractBox = {
-      left: Math.round(rightInfoX),
-      top: Math.round(infoTop),
-      width: Math.round(sbdBoxWidth),
-      height: infoBoxHeight,
-    };
-    logRegionBox('ROI', 'SBD', sbdExtractBox);
+    if ((metadata.width || 0) > (metadata.height || 0)) {
+      normalizedBuffer = await sharp(normalizedBuffer).rotate(90).toBuffer();
+      metadata = await sharp(normalizedBuffer).metadata();
+      console.log("   anh dau vao dang ngang, da xoay ve dang doc");
+    }
 
-    const sbdRegion = await sharp(imageBuffer)
-      .extract(sbdExtractBox)
-      .greyscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    if (metadata.format !== "jpeg" && metadata.format !== "png") {
+      normalizedBuffer = await sharp(normalizedBuffer).png().toBuffer();
+      metadata = await sharp(normalizedBuffer).metadata();
+    }
 
-    // Extract Mã Đề region
-    console.log(`   → Trích xuất vùng Mã Đề...`);
-    const madeExtractBox = {
-      left: Math.round(rightInfoX + sbdBoxWidth + rightInnerGap),
-      top: Math.round(infoTop),
-      width: Math.round(madeBoxWidth),
-      height: infoBoxHeight,
-    };
-    logRegionBox('ROI', 'Mã Đề', madeExtractBox);
+    console.log(`   kich thuoc anh sau chuan hoa: ${metadata.width}x${metadata.height}`);
 
-    const makeRegion = await sharp(imageBuffer)
-      .extract(madeExtractBox)
-      .greyscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    console.log("\n   STEP 1: tim anchor ngoai...");
+    const anchorPoints = await detectAnchorPoints(normalizedBuffer, metadata);
 
-    // Extract Answers grid region
-    console.log(`   → Trích xuất vùng Đáp án...`);
-    const answersGridX = Math.round(marginLeft);
-    const answersGridY = Math.round(infoTop + infoBoxHeight + pageHeight * 0.02);
-    const answersGridWidth = Math.round(pageWidth - 2 * marginLeft);
-    const answersGridHeight = Math.round(pageHeight - answersGridY - marginTop);
+    let correctedBuffer = normalizedBuffer;
+    let perspectiveApplied = false;
 
-    const answersExtractBox = {
-      left: answersGridX,
-      top: answersGridY,
-      width: answersGridWidth,
-      height: answersGridHeight,
-    };
-    logRegionBox('ROI', 'Đáp án', answersExtractBox);
+    if (anchorPoints) {
+      correctedBuffer = await normalizePageFromAnchors(normalizedBuffer, metadata, anchorPoints);
+      perspectiveApplied = correctedBuffer !== normalizedBuffer;
+      metadata = await sharp(correctedBuffer).metadata();
+    } else {
+      console.log("   khong tim thay du anchor ngoai, tiep tuc voi anh da chuan hoa");
+    }
 
-    const answersRegion = await sharp(imageBuffer)
-      .extract(answersExtractBox)
-      .greyscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    console.log("\n   STEP 2: cat dung 3 vung can quet...");
+    const roiData = await extractRegionROIs(correctedBuffer, metadata);
 
-    console.log(`   ✓ Đã trích xuất 3 vùng ROI`);
+    console.log("\n   STEP 3: quet MSSV...");
+    const mssv = detectDigits(roiData.sbd, 5, "SBD");
+    console.log(`   MSSV => ${mssv}`);
+
+    console.log("\n   STEP 4: quet ma de...");
+    const maDe = detectDigits(roiData.maDe, 3, "MADE");
+    console.log(`   MA DE => ${maDe}`);
+
+    console.log("\n   STEP 5: quet dap an...");
+    const answers = detectAnswersEnhanced(roiData.answers);
+
+    console.log("\n========================================");
+    console.log("   DETECTION COMPLETE");
+    console.log("========================================\n");
 
     return {
-      sbd: sbdRegion,
-      madeDe: makeRegion,
-      answers: answersRegion,
+      mssv: mssv || generatePlaceholder(5),
+      maDe: maDe || generatePlaceholder(3),
+      answers: answers || new Array(60).fill(null),
+      perspectiveApplied,
+      anchorsDetected: Boolean(anchorPoints),
     };
   } catch (error) {
-    console.warn(`   ⚠ Lỗi trích xuất ROI: ${error.message}`);
+    console.error(`OMR detection error: ${error.message}`);
     throw error;
   }
-};
-
-/**
- * Detect student number from SBD ROI (5 columns × 10 rows)
- */
-const detectStudentNumberEnhanced = async (roiData) => {
-  try {
-    const { data, info } = roiData;
-    const { width, height, channels } = info;
-
-    const digitColumns = 5;
-    const colWidth = width / digitColumns;
-    const topPadding = Math.round(height * 0.12); // 12% padding
-    const gridStartY = topPadding;
-    const gridEndY = height - Math.round(height * 0.04);
-    const gridHeight = gridEndY - gridStartY;
-
-    const digits = [];
-
-    // Process each column (digit position)
-    for (let col = 0; col < digitColumns; col++) {
-      const colStart = Math.round(col * colWidth + 2);
-      const colEnd = Math.round((col + 1) * colWidth - 2);
-      const colCenterX = Math.round((colStart + colEnd) / 2);
-      const rowHeight = gridHeight / 10;
-      const bubbleOuterR = Math.max(5, Math.round(Math.min(colWidth, rowHeight) * 0.20));
-      const bubbleInnerR = Math.max(3, Math.round(bubbleOuterR * 0.55));
-
-      // Measure darkness for each digit row (0-9)
-      const digitDarkness = [];
-
-      for (let digit = 0; digit < 10; digit++) {
-        const digitRowY = Math.round(gridStartY + ((digit + 0.5) / 10) * gridHeight);
-        const bubbleBox = toBoxFromCircle(colCenterX, digitRowY, bubbleOuterR);
-        logRegionBox(
-          'SBD',
-          `C${col}-D${digit}`,
-          bubbleBox,
-          `center=(${colCenterX},${digitRowY}), r=${bubbleOuterR}`
-        );
-
-        let innerDark = 0;
-        let innerTotal = 0;
-        let ringDark = 0;
-        let ringTotal = 0;
-
-        for (let dy = -bubbleOuterR; dy <= bubbleOuterR; dy++) {
-          for (let dx = -bubbleOuterR; dx <= bubbleOuterR; dx++) {
-            const dist2 = dx * dx + dy * dy;
-            if (dist2 > bubbleOuterR * bubbleOuterR) continue;
-
-            const x = colCenterX + dx;
-            const y = digitRowY + dy;
-
-            if (x < 0 || x >= width || y < 0 || y >= height) continue;
-            const pixelValue = data[y * width + x];
-            const isDark = pixelValue < 145;
-
-            if (dist2 <= bubbleInnerR * bubbleInnerR) {
-              innerTotal++;
-              if (isDark) innerDark++;
-            } else {
-              ringTotal++;
-              if (isDark) ringDark++;
-            }
-          }
-        }
-
-        const innerRatio = innerTotal > 0 ? innerDark / innerTotal : 0;
-        const ringRatio = ringTotal > 0 ? ringDark / ringTotal : 0;
-        // Filled bubble should have dark center; empty bubble mainly dark ring only.
-        const score = innerRatio - ringRatio * 0.35;
-        digitDarkness.push({ digit, darkness: score });
-      }
-
-      // Find digit with highest darkness (filled bubble)
-      const filledDigit = digitDarkness.reduce((max, curr) =>
-        curr.darkness > max.darkness ? curr : max
-      );
-
-      const selectedDigit = filledDigit.darkness > 0.04 ? filledDigit.digit : 0;
-      digits.push(selectedDigit);
-      
-      // DEBUG: Print darkness values for this column
-      const darknessStr = digitDarkness.map(d => `${d.digit}:${(d.darkness*100).toFixed(1)}%`).join(' | ');
-      console.log(`   [COL ${col}] Darkness: ${darknessStr} → Selected: ${selectedDigit} (max: ${filledDigit.digit} @${(filledDigit.darkness*100).toFixed(1)}%)`);
-    }
-
-    const result = digits.join('');
-    if (result !== '00000') {
-      console.log(`   ✓ SBD: "${result}"`);
-    } else {
-      console.log(`   ⚠ SBD: Không quét được rõ ràng`);
-    }
-
-    return result;
-  } catch (error) {
-    console.warn(`   ⚠ Lỗi detect SBD: ${error.message}`);
-    return null;
-  }
-};
-
-/**
- * Detect exam code from Mã Đề ROI (3 columns × 10 rows)
- */
-const detectExamCodeEnhanced = async (roiData) => {
-  try {
-    const { data, info } = roiData;
-    const { width, height, channels } = info;
-
-    const digitColumns = 3;
-    const colWidth = width / digitColumns;
-    const topPadding = Math.round(height * 0.12);
-    const gridStartY = topPadding;
-    const gridEndY = height - Math.round(height * 0.04);
-    const gridHeight = gridEndY - gridStartY;
-
-    const digits = [];
-
-    // Same process as SBD but for 3 columns
-    for (let col = 0; col < digitColumns; col++) {
-      const colStart = Math.round(col * colWidth + 2);
-      const colEnd = Math.round((col + 1) * colWidth - 2);
-      const colCenterX = Math.round((colStart + colEnd) / 2);
-      const rowHeight = gridHeight / 10;
-      const bubbleOuterR = Math.max(5, Math.round(Math.min(colWidth, rowHeight) * 0.20));
-      const bubbleInnerR = Math.max(3, Math.round(bubbleOuterR * 0.55));
-
-      const digitDarkness = [];
-
-      for (let digit = 0; digit < 10; digit++) {
-        const digitRowY = Math.round(gridStartY + ((digit + 0.5) / 10) * gridHeight);
-        const bubbleBox = toBoxFromCircle(colCenterX, digitRowY, bubbleOuterR);
-        logRegionBox(
-          'Mã Đề',
-          `C${col}-D${digit}`,
-          bubbleBox,
-          `center=(${colCenterX},${digitRowY}), r=${bubbleOuterR}`
-        );
-
-        let innerDark = 0;
-        let innerTotal = 0;
-        let ringDark = 0;
-        let ringTotal = 0;
-
-        for (let dy = -bubbleOuterR; dy <= bubbleOuterR; dy++) {
-          for (let dx = -bubbleOuterR; dx <= bubbleOuterR; dx++) {
-            const dist2 = dx * dx + dy * dy;
-            if (dist2 > bubbleOuterR * bubbleOuterR) continue;
-
-            const x = colCenterX + dx;
-            const y = digitRowY + dy;
-
-            if (x < 0 || x >= width || y < 0 || y >= height) continue;
-            const pixelValue = data[y * width + x];
-            const isDark = pixelValue < 145;
-
-            if (dist2 <= bubbleInnerR * bubbleInnerR) {
-              innerTotal++;
-              if (isDark) innerDark++;
-            } else {
-              ringTotal++;
-              if (isDark) ringDark++;
-            }
-          }
-        }
-
-        const innerRatio = innerTotal > 0 ? innerDark / innerTotal : 0;
-        const ringRatio = ringTotal > 0 ? ringDark / ringTotal : 0;
-        const score = innerRatio - ringRatio * 0.35;
-        digitDarkness.push({ digit, darkness: score });
-      }
-
-      const filledDigit = digitDarkness.reduce((max, curr) =>
-        curr.darkness > max.darkness ? curr : max
-      );
-
-      const selectedDigit = filledDigit.darkness > 0.04 ? filledDigit.digit : 0;
-      digits.push(selectedDigit);
-      
-      // DEBUG: Print darkness values for this column
-      const darknessStr = digitDarkness.map(d => `${d.digit}:${(d.darkness*100).toFixed(1)}%`).join(' | ');
-      console.log(`   [MÃ ĐỀ COL ${col}] Darkness: ${darknessStr} → Selected: ${selectedDigit} (max: ${filledDigit.digit} @${(filledDigit.darkness*100).toFixed(1)}%)`);
-    }
-
-    const result = digits.join('');
-    if (result !== '000') {
-      console.log(`   ✓ Mã Đề: "${result}"`);
-    } else {
-      console.log(`   ⚠ Mã Đề: Không quét được rõ ràng`);
-    }
-
-    return result;
-  } catch (error) {
-    console.warn(`   ⚠ Lỗi detect Mã Đề: ${error.message}`);
-    return null;
-  }
-};
-
-/**
- * Detect answers from answer grid ROI (60 questions × 4 choices)
- */
-const detectAnswersEnhanced = async (roiData) => {
-  try {
-    const { data, info } = roiData;
-    const { width, height, channels } = info;
-
-    const answers = [];
-    const questionsPerColumn = 20;
-    const columnsCount = 3;
-    const choicesCount = 4; // A, B, C, D
-    const totalQuestions = 60;
-
-    const colWidth = width / columnsCount;
-    const rowHeight = height / questionsPerColumn;
-    const choiceWidth = colWidth / choicesCount;
-
-    // Detection parameters
-    const bubbleRadius = 8;
-
-    for (let qIndex = 0; qIndex < totalQuestions; qIndex++) {
-      const colIndex = Math.floor(qIndex / questionsPerColumn);
-      const rowIndex = qIndex % questionsPerColumn;
-
-      const colStart = Math.round(colIndex * colWidth);
-      const rowStart = Math.round(rowIndex * rowHeight);
-
-      // Calculate bubble centers for A, B, C, D
-      const choices = ['A', 'B', 'C', 'D'];
-      let filledChoice = null;
-      let maxDarkness = 0;
-
-      for (let choiceIdx = 0; choiceIdx < choicesCount; choiceIdx++) {
-        const bubbleCenterX = Math.round(colStart + (choiceIdx + 0.5) * choiceWidth);
-        const bubbleCenterY = Math.round(rowStart + rowHeight / 2);
-        const bubbleBox = toBoxFromCircle(bubbleCenterX, bubbleCenterY, bubbleRadius);
-        logRegionBox(
-          'ANS',
-          `Q${qIndex + 1}-${choices[choiceIdx]}`,
-          bubbleBox,
-          `center=(${bubbleCenterX},${bubbleCenterY}), r=${bubbleRadius}, col=${colIndex}, row=${rowIndex}`
-        );
-
-        // Check if bubble is filled
-        let darkPixels = 0;
-        let totalPixels = 0;
-
-        for (let dx = -bubbleRadius; dx <= bubbleRadius; dx++) {
-          for (let dy = -bubbleRadius; dy <= bubbleRadius; dy++) {
-            if (dx * dx + dy * dy > bubbleRadius * bubbleRadius) continue;
-
-            const x = bubbleCenterX + dx;
-            const y = bubbleCenterY + dy;
-
-            if (x < 0 || x >= width || y < 0 || y >= height) continue;
-
-            const pixelValue = data[y * width + x];
-            totalPixels++;
-            if (pixelValue < 128) darkPixels++;
-          }
-        }
-
-        const darkness = totalPixels > 0 ? darkPixels / totalPixels : 0;
-
-        if (darkness > 0.35 && darkness > maxDarkness) {
-          maxDarkness = darkness;
-          filledChoice = choices[choiceIdx];
-        }
-      }
-
-      answers.push(filledChoice);
-    }
-
-    const answeredCount = answers.filter(a => a).length;
-    console.log(`   ✓ Quét được ${answeredCount}/${totalQuestions} câu trả lời`);
-
-    return answers;
-  } catch (error) {
-    console.warn(`   ⚠ Lỗi detect Answers: ${error.message}`);
-    return new Array(60).fill(null);
-  }
-};
-
-/**
- * Helper: Generate placeholder when detection fails
- */
-const generatePlaceholder = (length) => {
-  return '0'.repeat(length);
 };
 
 export default {
